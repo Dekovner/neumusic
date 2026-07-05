@@ -1,0 +1,6 @@
+/target
+*.AppImage
+/musikdown-x86_64.AppImage
+/assets/yt-dlp
+/assets/yt-dlp.exe
+/assets-windows/*.exe
