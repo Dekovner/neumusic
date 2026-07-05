@@ -3,32 +3,40 @@ use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-fn get_sample_rate(path: &Path, ffmpeg: &Path) -> anyhow::Result<u32> {
+fn ffprobe_cmd(ffmpeg: &Path) -> PathBuf {
     let parent = ffmpeg.parent().unwrap_or(Path::new(""));
     let probe_name = if cfg!(target_os = "windows") { "ffprobe.exe" } else { "ffprobe" };
-    let ffprobe = parent.join(probe_name);
+    parent.join(probe_name)
+}
 
-    let mut cmd = Command::new(&ffprobe);
+fn run_ffprobe(path: &Path, ffmpeg: &Path, entries: &str) -> anyhow::Result<String> {
+    let mut cmd = Command::new(ffprobe_cmd(ffmpeg));
     cmd.args([
         "-v", "error",
-        "-show_entries", "stream=sample_rate",
+        "-show_entries", entries,
         "-of", "default=noprint_wrappers=1:nokey=1",
         &path.to_string_lossy(),
     ]);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     let output = cmd.output()?;
-
-    let s = String::from_utf8_lossy(&output.stdout);
-    s.trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Не удалось прочитать sample rate: {}", e))
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str) -> anyhow::Result<PathBuf> {
-    let (ext, bitrate) = match format {
-        "mp3" => ("mp3", "192k"),
-        "ogg" => ("ogg", "208k"),
+fn get_sample_rate(path: &Path, ffmpeg: &Path) -> anyhow::Result<u32> {
+    let s = run_ffprobe(path, ffmpeg, "stream=sample_rate")?;
+    s.parse().map_err(|e| anyhow::anyhow!("Не удалось прочитать sample rate: {}", e))
+}
+
+pub fn get_actual_bitrate(path: &Path, ffmpeg: &Path) -> anyhow::Result<u64> {
+    let s = run_ffprobe(path, ffmpeg, "format=bit_rate")?;
+    s.parse().map_err(|e| anyhow::anyhow!("Не удалось прочитать bitrate: {}", e))
+}
+
+pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str, bitrate: &str) -> anyhow::Result<PathBuf> {
+    let ext = match format {
+        "mp3" => "mp3",
+        "ogg" => "ogg",
         _ => return Err(anyhow::anyhow!("Unknown format: {}", format)),
     };
 
@@ -74,10 +82,10 @@ pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str) -> anyhow::Resul
     Ok(output)
 }
 
-pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64, format: &str) -> anyhow::Result<PathBuf> {
-    let (ext, bitrate) = match format {
-        "mp3" => ("mp3", "192k"),
-        "ogg" => ("ogg", "208k"),
+pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64, format: &str, bitrate: &str) -> anyhow::Result<PathBuf> {
+    let ext = match format {
+        "mp3" => "mp3",
+        "ogg" => "ogg",
         _ => return Err(anyhow::anyhow!("Unknown format: {}", format)),
     };
     let tmp_ext = format!("silence.{ext}");

@@ -9,6 +9,9 @@
 - Sample rate enforcement (auto-downscale to 48kHz if exceeded)
 - DRM fallback: retry with `--extractor-args soundcloud:formats=*`
 - Dynamic conversion log (shows actual format and bitrate)
+- No upscaling: conversion uses `min(source_bitrate, target_bitrate)` for both MP3 and OGG
+- Displays actual average bitrate of downloaded audio in log
+- Green progress bar at 100%
 
 ### Bug fixes
 - Fixed double lossy encoding — removed `--audio-format mp3` from yt-dlp args

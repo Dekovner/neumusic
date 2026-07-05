@@ -199,21 +199,44 @@ impl NeuMusicApp {
         tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading..."))).ok();
         let first = downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?;
         tx.send(BgMsg::Progress(0.30)).ok();
-        tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded"))).ok();
+        let src_kbps = converter::get_actual_bitrate(&first, ffmpeg).ok().map(|b| b / 1000).unwrap_or(0);
+        let bitrate_str = if src_kbps > 0 {
+            format!("{}k", src_kbps)
+        } else {
+            String::new()
+        };
+        tx.send(BgMsg::Status(if src_kbps > 0 {
+            s(
+                &format!("  ✓ Скачано ({} kbps avg)", src_kbps),
+                &format!("  ✓ Downloaded ({} kbps avg)", src_kbps),
+            )
+        } else {
+            s("  ✓ Скачано", "  ✓ Downloaded")
+        })).ok();
         let mut current = first;
 
         if convert {
-            let (bitrate_label, codec_label) = match format {
-                "ogg" => ("208 kbps", "OGG"),
-                _ => ("192 kbps", "MP3"),
+            let target_kbps = match format {
+                "ogg" => 208,
+                _ => 192,
+            };
+            let effective_kbps = if src_kbps > 0 {
+                src_kbps.min(target_kbps)
+            } else {
+                target_kbps
+            };
+            let effective_bitrate = format!("{}k", effective_kbps);
+            let codec_label = match format {
+                "ogg" => "OGG",
+                _ => "MP3",
             };
             tx.send(BgMsg::Progress(0.40)).ok();
             tx.send(BgMsg::Status(s(
-                &format!("▶ Конвертация в {} ({})...", bitrate_label, codec_label),
-                &format!("▶ Converting to {} ({})...", bitrate_label, codec_label),
+                &format!("▶ Конвертация в {} kbps ({})...", effective_kbps, codec_label),
+                &format!("▶ Converting to {} kbps ({})...", effective_kbps, codec_label),
             )))
             .ok();
-            current = converter::convert_audio(ffmpeg, &current, format)?;
+            current = converter::convert_audio(ffmpeg, &current, format, &effective_bitrate)?;
             tx.send(BgMsg::Progress(0.60)).ok();
             tx.send(BgMsg::Status(s(
                 "  ✓ Конвертировано",
@@ -223,13 +246,24 @@ impl NeuMusicApp {
         }
 
         if silence {
+            let silence_bitrate = if convert {
+                let target_kbps = match format { "ogg" => 208, _ => 192 };
+                let effective_kbps = if src_kbps > 0 { src_kbps.min(target_kbps) } else { target_kbps };
+                format!("{}k", effective_kbps)
+            } else {
+                String::new()
+            };
             tx.send(BgMsg::Progress(0.70)).ok();
             tx.send(BgMsg::Status(s(
                 "▶ Добавление тишины...",
                 "▶ Adding silence...",
             )))
             .ok();
-            current = converter::add_silence(ffmpeg, &current, ms, format)?;
+            if convert {
+                current = converter::add_silence(ffmpeg, &current, ms, format, &silence_bitrate)?;
+            } else {
+                current = converter::add_silence(ffmpeg, &current, ms, format, &bitrate_str)?;
+            }
             tx.send(BgMsg::Progress(0.85)).ok();
             tx.send(BgMsg::Status(s(
                 "  ✓ Тишина добавлена",
@@ -429,7 +463,11 @@ impl eframe::App for NeuMusicApp {
                 });
 
                 if self.progress > 0.0 {
-                    ui.add(egui::ProgressBar::new(self.progress).show_percentage());
+                    let mut bar = egui::ProgressBar::new(self.progress).show_percentage();
+                    if self.progress >= 1.0 {
+                        bar = bar.fill(egui::Color32::GREEN);
+                    }
+                    ui.add(bar);
                 }
 
                 if !self.log.is_empty() {
