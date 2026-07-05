@@ -1,6 +1,6 @@
 # NeuMusic
 
-GUI audio downloader for YouTube. Downloads best-quality audio (Opus/Webm), converts to 192kbps MP3 with optional silence at the start.
+GUI audio downloader. Downloads best-quality audio, converts to 192kbps MP3 with optional silence at the start.
 
 ## Download
 
@@ -11,7 +11,7 @@ Get the latest release from [Releases](https://github.com/Dekovner/neumusic/rele
 
 ## Usage
 
-1. Paste a YouTube URL
+1. Paste a URL
 2. Select output folder
 3. (Optional) enable 192kbps conversion and/or silence at start
 4. Click Download
