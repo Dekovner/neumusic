@@ -6,11 +6,19 @@ use rfd::FileDialog;
 
 use crate::{converter, downloader};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(PartialEq)]
 enum Lang {
     Ru,
     En,
+}
+
+#[derive(PartialEq, Clone)]
+enum OutputFormat {
+    Mp3,
+    Ogg,
 }
 
 pub struct NeuMusicApp {
@@ -24,8 +32,10 @@ pub struct NeuMusicApp {
     silence_ms: String,
     playlist: bool,
 
+    output_format: OutputFormat,
     lang: Lang,
     status: String,
+    progress: f32,
     busy: bool,
     bg_task: Option<mpsc::Receiver<BgMsg>>,
 
@@ -34,6 +44,7 @@ pub struct NeuMusicApp {
 
 enum BgMsg {
     Status(String),
+    Progress(f32),
     Error(String),
     Done,
 }
@@ -48,9 +59,10 @@ fn t(lang: &Lang, ru: &str, en: &str) -> String {
 fn paste_from_clipboard() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("powershell")
-            .args(["-command", "Get-Clipboard"])
-            .output().ok()
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-command", "Get-Clipboard"]);
+        cmd.creation_flags(0x08000000);
+        cmd.output().ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     }
@@ -87,8 +99,10 @@ impl NeuMusicApp {
             output_dir: music_dir,
             convert_192: true,
             silence_ms: "2000".to_owned(),
+            output_format: OutputFormat::Mp3,
             lang: Lang::En,
             status: "Ready".to_owned(),
+            progress: 0.0,
             log: vec!["Ready".to_owned()],
             ..Default::default()
         }
@@ -125,6 +139,7 @@ impl NeuMusicApp {
         }
 
         self.busy = true;
+        self.progress = 0.0;
         self.log.clear();
         self.status = t(&self.lang, "Загрузка...", "Downloading...");
         self.log.push(t(&self.lang, "Загрузка...", "Downloading..."));
@@ -134,6 +149,10 @@ impl NeuMusicApp {
         let url = self.url.trim().to_owned();
         let dir = self.output_dir.clone();
         let convert = self.convert_192;
+        let format_str = match self.output_format {
+            OutputFormat::Mp3 => "mp3",
+            OutputFormat::Ogg => "ogg",
+        }.to_owned();
         let silence = self.add_silence;
         let ms: u64 = self.silence_ms.parse().unwrap_or(2000);
         let playlist = self.playlist;
@@ -144,7 +163,7 @@ impl NeuMusicApp {
 
         thread::spawn(move || {
             let result = Self::run_pipeline(
-                &yt_dlp, &ffmpeg, &url, &dir, convert, silence, ms, playlist, lang_is_en, &tx,
+                &yt_dlp, &ffmpeg, &url, &dir, convert, &format_str, silence, ms, playlist, lang_is_en, &tx,
             );
             match result {
                 Ok(()) => tx.send(BgMsg::Done).ok(),
@@ -161,6 +180,7 @@ impl NeuMusicApp {
         url: &str,
         dir: &Path,
         convert: bool,
+        format: &str,
         silence: bool,
         ms: u64,
         playlist: bool,
@@ -175,18 +195,26 @@ impl NeuMusicApp {
             }
         };
 
+        tx.send(BgMsg::Progress(0.05)).ok();
         tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading..."))).ok();
         let first = downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?;
+        tx.send(BgMsg::Progress(0.30)).ok();
         tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded"))).ok();
         let mut current = first;
 
         if convert {
+            let (bitrate_label, codec_label) = match format {
+                "ogg" => ("208 kbps", "OGG"),
+                _ => ("192 kbps", "MP3"),
+            };
+            tx.send(BgMsg::Progress(0.40)).ok();
             tx.send(BgMsg::Status(s(
-                "▶ Конвертация в 192 kbps...",
-                "▶ Converting to 192 kbps...",
+                &format!("▶ Конвертация в {} ({})...", bitrate_label, codec_label),
+                &format!("▶ Converting to {} ({})...", bitrate_label, codec_label),
             )))
             .ok();
-            current = converter::convert_to_192(ffmpeg, &current)?;
+            current = converter::convert_audio(ffmpeg, &current, format)?;
+            tx.send(BgMsg::Progress(0.60)).ok();
             tx.send(BgMsg::Status(s(
                 "  ✓ Конвертировано",
                 "  ✓ Converted",
@@ -195,12 +223,14 @@ impl NeuMusicApp {
         }
 
         if silence {
+            tx.send(BgMsg::Progress(0.70)).ok();
             tx.send(BgMsg::Status(s(
                 "▶ Добавление тишины...",
                 "▶ Adding silence...",
             )))
             .ok();
-            current = converter::add_silence(ffmpeg, &current, ms)?;
+            current = converter::add_silence(ffmpeg, &current, ms, format)?;
+            tx.send(BgMsg::Progress(0.85)).ok();
             tx.send(BgMsg::Status(s(
                 "  ✓ Тишина добавлена",
                 "  ✓ Silence added",
@@ -208,14 +238,17 @@ impl NeuMusicApp {
             .ok();
         }
 
+        tx.send(BgMsg::Progress(0.90)).ok();
         tx.send(BgMsg::Status(s(
             "▶ Очистка временных файлов...",
             "▶ Cleaning temp files...",
         )))
         .ok();
-        converter::cleanup(dir, &current);
+        converter::cleanup(dir, &current, format);
+        tx.send(BgMsg::Progress(0.95)).ok();
         tx.send(BgMsg::Status(s("  ✓ Очищено", "  ✓ Cleaned"))).ok();
 
+        tx.send(BgMsg::Progress(1.0)).ok();
         tx.send(BgMsg::Status(s("  ✓ Готово", "  ✓ Done"))).ok();
         Ok(())
     }
@@ -232,6 +265,9 @@ impl NeuMusicApp {
                 BgMsg::Status(s) => {
                     self.status = s.clone();
                     self.log.push(s);
+                }
+                BgMsg::Progress(p) => {
+                    self.progress = p;
                 }
                 BgMsg::Error(e) => {
                     let prefix = t(&self.lang, "Ошибка: ", "Error: ");
@@ -283,11 +319,13 @@ impl Default for NeuMusicApp {
             url: String::new(),
             output_dir: PathBuf::new(),
             convert_192: true,
+            output_format: OutputFormat::Mp3,
             add_silence: false,
             silence_ms: "2000".to_owned(),
             playlist: false,
             lang: Lang::En,
             status: "Готов".to_owned(),
+            progress: 0.0,
             busy: false,
             bg_task: None,
             log: Vec::new(),
@@ -341,10 +379,16 @@ impl eframe::App for NeuMusicApp {
 
                 ui.separator();
 
-                ui.checkbox(
-                    &mut self.convert_192,
-                    t(&self.lang, "Конвертировать в 192 kbps", "Convert to 192 kbps"),
-                );
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.convert_192,
+                        t(&self.lang, "Конвертировать аудио", "Convert audio"),
+                    );
+                    if self.convert_192 {
+                        ui.radio_value(&mut self.output_format, OutputFormat::Mp3, "MP3 192kbps");
+                        ui.radio_value(&mut self.output_format, OutputFormat::Ogg, "OGG 208kbps");
+                    }
+                });
 
                 ui.checkbox(
                     &mut self.add_silence,
@@ -368,19 +412,25 @@ impl eframe::App for NeuMusicApp {
                     && !self.url.trim().is_empty()
                     && !self.output_dir.as_os_str().is_empty();
 
-                if ui
-                    .add_enabled(can_start, egui::Button::new(t(&self.lang, "Скачать", "Download")))
-                    .clicked()
-                {
-                    self.start_download(ctx);
-                }
-
                 ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_start, egui::Button::new(t(&self.lang, "Скачать", "Download")))
+                        .clicked()
+                    {
+                        self.start_download(ctx);
+                    }
                     if self.busy {
                         ui.spinner();
                     }
+                });
+
+                ui.horizontal(|ui| {
                     ui.label(&self.status);
                 });
+
+                if self.progress > 0.0 {
+                    ui.add(egui::ProgressBar::new(self.progress).show_percentage());
+                }
 
                 if !self.log.is_empty() {
                     ui.separator();

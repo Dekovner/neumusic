@@ -1,52 +1,117 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
-pub fn convert_to_192(ffmpeg: &Path, input: &Path) -> anyhow::Result<PathBuf> {
-    let output = input.with_extension("mp3");
+fn get_sample_rate(path: &Path, ffmpeg: &Path) -> anyhow::Result<u32> {
+    let parent = ffmpeg.parent().unwrap_or(Path::new(""));
+    let probe_name = if cfg!(target_os = "windows") { "ffprobe.exe" } else { "ffprobe" };
+    let ffprobe = parent.join(probe_name);
+
+    let mut cmd = Command::new(&ffprobe);
+    cmd.args([
+        "-v", "error",
+        "-show_entries", "stream=sample_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        &path.to_string_lossy(),
+    ]);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    let output = cmd.output()?;
+
+    let s = String::from_utf8_lossy(&output.stdout);
+    s.trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Не удалось прочитать sample rate: {}", e))
+}
+
+pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str) -> anyhow::Result<PathBuf> {
+    let (ext, bitrate) = match format {
+        "mp3" => ("mp3", "192k"),
+        "ogg" => ("ogg", "208k"),
+        _ => return Err(anyhow::anyhow!("Unknown format: {}", format)),
+    };
+
+    let output = input.with_extension(ext);
     if output == input {
         return Ok(input.to_path_buf());
     }
 
-    let status = Command::new(ffmpeg)
-        .args([
-            "-y",
-            "-i",
-            &input.to_string_lossy(),
-            "-b:a",
-            "192k",
-            &output.to_string_lossy(),
-        ])
+    let mut args: Vec<String> = vec![
+        "-y".to_owned(),
+        "-i".to_owned(),
+        input.to_string_lossy().to_string(),
+        "-b:a".to_owned(),
+        bitrate.to_owned(),
+    ];
+
+    if format == "ogg" {
+        args.push("-c:a".to_owned());
+        args.push("libvorbis".to_owned());
+    }
+
+    if get_sample_rate(input, ffmpeg).unwrap_or(0) > 48000 {
+        args.push("-ar".to_owned());
+        args.push("48000".to_owned());
+    }
+
+    args.push(output.to_string_lossy().to_string());
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(&args)
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    let status = cmd.status()
         .map_err(|e| anyhow::anyhow!("Не удалось запустить ffmpeg: {}", e))?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("ffmpeg: ошибка конвертации в 192 kbps"));
+        return Err(anyhow::anyhow!("ffmpeg: ошибка конвертации в {} kbps {}", bitrate.trim_end_matches('k'), ext));
     }
 
     std::fs::remove_file(input)?;
     Ok(output)
 }
 
-pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64) -> anyhow::Result<PathBuf> {
-    let tmp = input.with_extension("silence.mp3");
+pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64, format: &str) -> anyhow::Result<PathBuf> {
+    let (ext, bitrate) = match format {
+        "mp3" => ("mp3", "192k"),
+        "ogg" => ("ogg", "208k"),
+        _ => return Err(anyhow::anyhow!("Unknown format: {}", format)),
+    };
+    let tmp_ext = format!("silence.{ext}");
+    let tmp = input.with_extension(&tmp_ext);
     let adelays = format!("adelay={}|{}", ms, ms);
 
-    let status = Command::new(ffmpeg)
-        .args([
-            "-y",
-            "-i",
-            &input.to_string_lossy(),
-            "-b:a",
-            "192k",
-            "-af",
-            &adelays,
-            &tmp.to_string_lossy(),
-        ])
+    let mut args: Vec<String> = vec![
+        "-y".to_owned(),
+        "-i".to_owned(),
+        input.to_string_lossy().to_string(),
+        "-b:a".to_owned(),
+        bitrate.to_owned(),
+    ];
+    if format == "ogg" {
+        args.push("-c:a".to_owned());
+        args.push("libvorbis".to_owned());
+    }
+
+    if get_sample_rate(input, ffmpeg).unwrap_or(0) > 48000 {
+        args.push("-ar".to_owned());
+        args.push("48000".to_owned());
+    }
+
+    args.push("-af".to_owned());
+    args.push(adelays.clone());
+    args.push(tmp.to_string_lossy().to_string());
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(&args)
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    let status = cmd.status()
         .map_err(|e| anyhow::anyhow!("Не удалось запустить ffmpeg: {}", e))?;
 
     if !status.success() {
@@ -54,7 +119,7 @@ pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64) -> anyhow::Result<PathB
     }
 
     std::fs::remove_file(input)?;
-    let output = input.with_extension("mp3");
+    let output = input.with_extension(ext);
     std::fs::rename(&tmp, &output)?;
     Ok(output)
 }
@@ -64,7 +129,7 @@ const CLEANUP_EXTS: &[&str] = &[
     "m4a", "webm", "opus", "mka", "ogg", "aac", "wav", "flac",
 ];
 
-pub fn cleanup(dir: &Path, keep: &Path) {
+pub fn cleanup(dir: &Path, keep: &Path, format: &str) {
     let keep_stem = keep.file_stem();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -81,7 +146,7 @@ pub fn cleanup(dir: &Path, keep: &Path) {
                 && path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".silence.mp3"));
+                    .is_some_and(|n| n.ends_with(&format!(".silence.{}", format)));
             if is_temp || is_silence_tmp {
                 let _ = std::fs::remove_file(&path);
             }

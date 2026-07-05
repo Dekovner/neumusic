@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 pub const AUDIO_EXTS: &[&str] = &[
     "mp3", "m4a", "webm", "opus", "mka", "ogg", "aac", "wav", "flac",
@@ -33,19 +35,32 @@ pub fn download_audio(
     }
     args.push(url.to_owned());
 
-    let status = Command::new(yt_dlp)
-        .args(&args)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|e| anyhow::anyhow!("Не удалось запустить yt-dlp: {}", e))?;
-
-    if !status.success() {
-        return Err(anyhow::anyhow!("yt-dlp: ошибка загрузки"));
+    fn run_ytdlp(args: &[String], yt_dlp: &Path) -> anyhow::Result<bool> {
+        let mut cmd = Command::new(yt_dlp);
+        cmd.args(args)
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let status = cmd.status()
+            .map_err(|e| anyhow::anyhow!("Не удалось запустить yt-dlp: {}", e))?;
+        Ok(status.success())
     }
 
-    find_newest_audio(dir)
-        .ok_or_else(|| anyhow::anyhow!("Не найден скачанный аудиофайл"))
+    if run_ytdlp(&args, yt_dlp)? {
+        return find_newest_audio(dir)
+            .ok_or_else(|| anyhow::anyhow!("Не найден скачанный аудиофайл"));
+    }
+
+    let mut fallback_args = vec!["--extractor-args".to_owned(), "soundcloud:formats=*".to_owned()];
+    fallback_args.extend(args);
+
+    if run_ytdlp(&fallback_args, yt_dlp)? {
+        return find_newest_audio(dir)
+            .ok_or_else(|| anyhow::anyhow!("Не найден скачанный аудиофайл"));
+    }
+
+    Err(anyhow::anyhow!("yt-dlp: ошибка загрузки. Возможно, контент защищён DRM."))
 }
 
 pub fn find_newest_audio(dir: &Path) -> Option<PathBuf> {
