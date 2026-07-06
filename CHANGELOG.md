@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.1
+
+### New features
+- 7 languages: Español, 日本語, 한국어, 中文, Português (ComboBox selector)
+- Embedded CJK fonts (Noto Sans JP/KR/SC) — no more missing glyphs
+
+---
+
 ## v1.1.0
 
 ### New features
