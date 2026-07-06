@@ -9,10 +9,29 @@ use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Lang {
     Ru,
     En,
+    Es,
+    Ja,
+    Ko,
+    Zh,
+    Pt,
+}
+
+impl Lang {
+    fn label(&self) -> &str {
+        match self {
+            Lang::Ru => "Русский",
+            Lang::En => "English",
+            Lang::Es => "Español",
+            Lang::Ja => "日本語",
+            Lang::Ko => "한국어",
+            Lang::Zh => "中文",
+            Lang::Pt => "Português",
+        }
+    }
 }
 
 #[derive(PartialEq, Clone)]
@@ -21,39 +40,12 @@ enum OutputFormat {
     Ogg,
 }
 
-pub struct NeuMusicApp {
-    yt_dlp: PathBuf,
-    ffmpeg: PathBuf,
-    url: String,
-    output_dir: PathBuf,
-
-    local_file: Option<PathBuf>,
-
-    convert_192: bool,
-    output_format: OutputFormat,
-    add_silence: bool,
-    silence_ms: String,
-    playlist: bool,
-    debloat_enabled: bool,
-    debloat_bitrate: u32,
-
-    lang: Lang,
-    status: String,
-    progress: f32,
-    busy: bool,
-    bg_task: Option<mpsc::Receiver<BgMsg>>,
-
-    log: Vec<(String, egui::Color32)>,
-    update_state: UpdateState,
-    update_rx: Option<mpsc::Receiver<UpdateState>>,
-}
-
 enum BgMsg {
     Status(String),
-    Progress(f32),
-    Error(String),
-    Done,
     Warning(String),
+    Error(String),
+    Progress(f32),
+    Done,
 }
 
 enum UpdateState {
@@ -64,11 +56,16 @@ enum UpdateState {
     Error(String),
 }
 
-fn t(lang: &Lang, ru: &str, en: &str) -> String {
+fn t(lang: &Lang, ru: &str, en: &str, es: &str, ja: &str, ko: &str, zh: &str, pt: &str) -> String {
     match lang {
-        Lang::Ru => ru.to_owned(),
-        Lang::En => en.to_owned(),
-    }
+        Lang::Ru => ru,
+        Lang::En => en,
+        Lang::Es => es,
+        Lang::Ja => ja,
+        Lang::Ko => ko,
+        Lang::Zh => zh,
+        Lang::Pt => pt,
+    }.to_owned()
 }
 
 fn paste_from_clipboard() -> Option<String> {
@@ -104,6 +101,33 @@ fn paste_from_clipboard() -> Option<String> {
     }
 }
 
+pub struct NeuMusicApp {
+    yt_dlp: PathBuf,
+    ffmpeg: PathBuf,
+    url: String,
+    output_dir: PathBuf,
+
+    local_file: Option<PathBuf>,
+
+    convert_192: bool,
+    output_format: OutputFormat,
+    add_silence: bool,
+    silence_ms: String,
+    playlist: bool,
+    debloat_enabled: bool,
+    debloat_bitrate: u32,
+
+    lang: Lang,
+    status: String,
+    progress: f32,
+    busy: bool,
+    bg_task: Option<mpsc::Receiver<BgMsg>>,
+
+    log: Vec<(String, egui::Color32)>,
+    update_state: UpdateState,
+    update_rx: Option<mpsc::Receiver<UpdateState>>,
+}
+
 impl NeuMusicApp {
     pub fn new(yt_dlp: PathBuf, ffmpeg: PathBuf, saved_dir: Option<String>) -> Self {
         let output_dir = saved_dir
@@ -127,19 +151,18 @@ impl NeuMusicApp {
         }
     }
 
-    fn toggle_lang(&mut self) {
-        self.lang = match self.lang {
-            Lang::En => {
-                self.status = "Готов".to_owned();
-                self.log = vec![("Готов".to_owned(), egui::Color32::WHITE)];
-                Lang::Ru
-            }
-            Lang::Ru => {
-                self.status = "Ready".to_owned();
-                self.log = vec![("Ready".to_owned(), egui::Color32::WHITE)];
-                Lang::En
-            }
+    fn on_lang_changed(&mut self) {
+        let msg = match self.lang {
+            Lang::Ru => "Готов",
+            Lang::En => "Ready",
+            Lang::Es => "Listo",
+            Lang::Ja => "準備完了",
+            Lang::Ko => "준비 완료",
+            Lang::Zh => "准备就绪",
+            Lang::Pt => "Pronto",
         };
+        self.status = msg.to_owned();
+        self.log = vec![(msg.to_owned(), egui::Color32::WHITE)];
     }
 
     fn pick_dir(&mut self) {
@@ -169,6 +192,11 @@ impl NeuMusicApp {
             self.status = t(&self.lang,
                 "Введите URL или выберите локальный файл.",
                 "Enter URL or select a local file.",
+                "Ingrese URL o seleccione un archivo local.",
+                "URLを入力するか、ローカルファイルを選択してください。",
+                "URL을 입력하거나 로컬 파일을 선택하세요.",
+                "输入URL或选择本地文件。",
+                "Insira URL ou selecione um arquivo local.",
             );
             return;
         }
@@ -176,6 +204,11 @@ impl NeuMusicApp {
             self.status = t(&self.lang,
                 "Выберите папку для сохранения.",
                 "Select an output folder.",
+                "Seleccione una carpeta de salida.",
+                "出力フォルダを選択してください。",
+                "출력 폴더를 선택하세요.",
+                "选择输出文件夹。",
+                "Selecione uma pasta de saída.",
             );
             return;
         }
@@ -183,8 +216,8 @@ impl NeuMusicApp {
         self.busy = true;
         self.progress = 0.0;
         self.log.clear();
-        self.status = t(&self.lang, "Загрузка...", "Downloading...");
-        self.log.push((t(&self.lang, "Загрузка...", "Downloading..."), egui::Color32::WHITE));
+        self.status = t(&self.lang, "Загрузка...", "Downloading...", "Descargando...", "ダウンロード中...", "다운로드 중...", "下载中...", "Baixando...");
+        self.log.push((t(&self.lang, "Загрузка...", "Downloading...", "Descargando...", "ダウンロード中...", "다운로드 중...", "下载中...", "Baixando..."), egui::Color32::WHITE));
 
         let yt_dlp = self.yt_dlp.clone();
         let ffmpeg = self.ffmpeg.clone();
@@ -201,7 +234,7 @@ impl NeuMusicApp {
         let debloat = self.debloat_enabled;
         let debloat_bitrate = self.debloat_bitrate;
         let local_file = self.local_file.clone();
-        let lang_is_en = matches!(self.lang, Lang::En);
+        let lang = self.lang;
 
         let (tx, rx) = mpsc::channel();
         self.bg_task = Some(rx);
@@ -210,7 +243,7 @@ impl NeuMusicApp {
             let result = Self::run_pipeline(
                 &yt_dlp, &ffmpeg, &url, &dir,
                 convert, &format_str, silence, ms, playlist, debloat, debloat_bitrate as u64, local_file,
-                lang_is_en, &tx,
+                &lang, &tx,
             );
             match result {
                 Ok(()) => tx.send(BgMsg::Done).ok(),
@@ -221,6 +254,7 @@ impl NeuMusicApp {
         ctx.request_repaint();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_pipeline(
         yt_dlp: &Path,
         ffmpeg: &Path,
@@ -234,11 +268,19 @@ impl NeuMusicApp {
         debloat: bool,
         debloat_bitrate: u64,
         local_file: Option<PathBuf>,
-        en: bool,
+        lang: &Lang,
         tx: &mpsc::Sender<BgMsg>,
     ) -> anyhow::Result<()> {
-        let s = |ru: &str, en_str: &str| -> String {
-            if en { en_str.to_owned() } else { ru.to_owned() }
+        let s = |ru: &str, en: &str, es: &str, ja: &str, ko: &str, zh: &str, pt: &str| -> String {
+            match lang {
+                Lang::Ru => ru,
+                Lang::En => en,
+                Lang::Es => es,
+                Lang::Ja => ja,
+                Lang::Ko => ko,
+                Lang::Zh => zh,
+                Lang::Pt => pt,
+            }.to_owned()
         };
 
         let mut current: PathBuf;
@@ -264,13 +306,18 @@ impl NeuMusicApp {
             tx.send(BgMsg::Status(s(
                 &format!("▶ Файл: {}", name),
                 &format!("▶ File: {}", name),
+                &format!("▶ Archivo: {}", name),
+                &format!("▶ ファイル: {}", name),
+                &format!("▶ 파일: {}", name),
+                &format!("▶ 文件: {}", name),
+                &format!("▶ Arquivo: {}", name),
             ))).ok();
         } else {
             tx.send(BgMsg::Progress(0.05)).ok();
-            tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading..."))).ok();
+            tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading...", "▶ Descargando...", "▶ ダウンロード中...", "▶ 다운로드 중...", "▶ 下载中...", "▶ Baixando..."))).ok();
             current = downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?;
             tx.send(BgMsg::Progress(0.30)).ok();
-            tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded"))).ok();
+            tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded", "  ✓ Descargado", "  ✓ ダウンロード完了", "  ✓ 다운로드 완료", "  ✓ 下载完成", "  ✓ Baixado"))).ok();
         }
 
         let src_kbps = converter::get_actual_bitrate(&current, ffmpeg)
@@ -288,6 +335,11 @@ impl NeuMusicApp {
             tx.send(BgMsg::Status(s(
                 &format!("▶ Конвертация в {} kbps ({})...", target_kbps, codec_label),
                 &format!("▶ Converting to {} kbps ({})...", target_kbps, codec_label),
+                &format!("▶ Convirtiendo a {} kbps ({})...", target_kbps, codec_label),
+                &format!("▶ {} kbps ({}) に変換中...", target_kbps, codec_label),
+                &format!("▶ {} kbps ({}) 변환 중...", target_kbps, codec_label),
+                &format!("▶ 正在转换为 {} kbps ({})...", target_kbps, codec_label),
+                &format!("▶ Convertendo para {} kbps ({})...", target_kbps, codec_label),
             ))).ok();
             current = converter::convert_audio(ffmpeg, &current, format)?;
             tx.send(BgMsg::Progress(0.60)).ok();
@@ -297,11 +349,21 @@ impl NeuMusicApp {
                 tx.send(BgMsg::Status(s(
                     &format!("  ✓ Конвертировано ({} kbps avg)", kbps),
                     &format!("  ✓ Converted ({} kbps avg)", kbps),
+                    &format!("  ✓ Convertido ({} kbps promedio)", kbps),
+                    &format!("  ✓ 変換完了 (平均 {} kbps)", kbps),
+                    &format!("  ✓ 변환 완료 (평균 {} kbps)", kbps),
+                    &format!("  ✓ 转换完成（平均 {} kbps）", kbps),
+                    &format!("  ✓ Convertido (média {} kbps)", kbps),
                 ))).ok();
             } else {
                 tx.send(BgMsg::Status(s(
                     "  ✓ Конвертировано",
                     "  ✓ Converted",
+                    "  ✓ Convertido",
+                    "  ✓ 変換完了",
+                    "  ✓ 변환 완료",
+                    "  ✓ 转换完成",
+                    "  ✓ Convertido",
                 ))).ok();
             }
         }
@@ -311,12 +373,22 @@ impl NeuMusicApp {
             tx.send(BgMsg::Status(s(
                 "▶ Добавление тишины...",
                 "▶ Adding silence...",
+                "▶ Agregando silencio...",
+                "▶ 無音を追加中...",
+                "▶ 무음 추가 중...",
+                "▶ 正在添加静音...",
+                "▶ Adicionando silêncio...",
             ))).ok();
             current = converter::add_silence(ffmpeg, &current, ms, format)?;
             tx.send(BgMsg::Progress(0.80)).ok();
             tx.send(BgMsg::Status(s(
                 "  ✓ Тишина добавлена",
                 "  ✓ Silence added",
+                "  ✓ Silencio agregado",
+                "  ✓ 無音を追加しました",
+                "  ✓ 무음 추가 완료",
+                "  ✓ 静音已添加",
+                "  ✓ Silêncio adicionado",
             ))).ok();
         }
 
@@ -326,12 +398,22 @@ impl NeuMusicApp {
             tx.send(BgMsg::Status(s(
                 &format!("▶ Деблоатинг: cap {} kbps...", max_kbps),
                 &format!("▶ Debloat: cap {} kbps...", max_kbps),
+                &format!("▶ Reduciendo: límite {} kbps...", max_kbps),
+                &format!("▶ デブロート: 上限 {} kbps...", max_kbps),
+                &format!("▶ 디블로팅: 상한 {} kbps...", max_kbps),
+                &format!("▶ 去膨胀：上限 {} kbps...", max_kbps),
+                &format!("▶ Reduzindo: limite {} kbps...", max_kbps),
             ))).ok();
             current = converter::debloat(ffmpeg, &current, format, max_kbps)?;
             tx.send(BgMsg::Progress(0.92)).ok();
             tx.send(BgMsg::Status(s(
                 &format!("  ✓ Деблоатинг завершён ({} kbps)", max_kbps),
                 &format!("  ✓ Debloat done ({} kbps)", max_kbps),
+                &format!("  ✓ Reducción completada ({} kbps)", max_kbps),
+                &format!("  ✓ デブロート完了 ({} kbps)", max_kbps),
+                &format!("  ✓ 디블로팅 완료 ({} kbps)", max_kbps),
+                &format!("  ✓ 去膨胀完成（{} kbps）", max_kbps),
+                &format!("  ✓ Redução concluída ({} kbps)", max_kbps),
             ))).ok();
         }
 
@@ -341,6 +423,11 @@ impl NeuMusicApp {
             tx.send(BgMsg::Status(s(
                 &format!("  ✓ Итоговый битрейт: {} kbps", actual),
                 &format!("  ✓ Final bitrate: {} kbps", actual),
+                &format!("  ✓ Tasa de bits final: {} kbps", actual),
+                &format!("  ✓ 最終ビットレート: {} kbps", actual),
+                &format!("  ✓ 최종 비트레이트: {} kbps", actual),
+                &format!("  ✓ 最终比特率：{} kbps", actual),
+                &format!("  ✓ Taxa de bits final: {} kbps", actual),
             ))).ok();
         }
 
@@ -348,10 +435,15 @@ impl NeuMusicApp {
         tx.send(BgMsg::Status(s(
             "▶ Очистка временных файлов...",
             "▶ Cleaning temp files...",
+            "▶ Limpiando archivos temporales...",
+            "▶ 一時ファイルを削除中...",
+            "▶ 임시 파일 정리 중...",
+            "▶ 正在清理临时文件...",
+            "▶ Limpando arquivos temporários...",
         ))).ok();
         converter::cleanup(dir, &current, format);
         tx.send(BgMsg::Progress(0.95)).ok();
-        tx.send(BgMsg::Status(s("  ✓ Очищено", "  ✓ Cleaned"))).ok();
+        tx.send(BgMsg::Status(s("  ✓ Очищено", "  ✓ Cleaned", "  ✓ Limpiado", "  ✓ 削除完了", "  ✓ 정리 완료", "  ✓ 已清理", "  ✓ Limpo"))).ok();
 
         if let Some(ref orig_name) = local_work_rename {
             let final_path = dir.join(orig_name).with_extension(
@@ -361,12 +453,17 @@ impl NeuMusicApp {
         }
 
         tx.send(BgMsg::Progress(1.0)).ok();
-        tx.send(BgMsg::Status(s("  ✓ Готово", "  ✓ Done"))).ok();
+        tx.send(BgMsg::Status(s("  ✓ Готово", "  ✓ Done", "  ✓ Hecho", "  ✓ 完了", "  ✓ 완료", "  ✓ 完成", "  ✓ Pronto"))).ok();
 
         if !debloat && src_kbps > 0 && actual > src_kbps && src_kbps < target_kbps {
             tx.send(BgMsg::Warning(s(
                 &format!("⚠ Возможно раздутие аудио: {} → {} kbps. Проверьте спектрограмму вручную.", src_kbps, actual),
                 &format!("⚠ Audio possibly bloated: {} → {} kbps. Manual spectrogram check required.", src_kbps, actual),
+                &format!("⚠ Posible inflado de audio: {} → {} kbps. Verifique el espectrograma manualmente.", src_kbps, actual),
+                &format!("⚠ オーディオが膨張している可能性があります: {} → {} kbps。手動でスペクトログラムを確認してください。", src_kbps, actual),
+                &format!("⚠ 오디오가 부풀려졌을 가능성: {} → {} kbps. 수동으로 스펙트로그램을 확인하세요.", src_kbps, actual),
+                &format!("⚠ 音频可能已膨胀：{} → {} kbps。请手动检查频谱图。", src_kbps, actual),
+                &format!("⚠ Áudio possivelmente inflado: {} → {} kbps. Verifique o espectrograma manualmente.", src_kbps, actual),
             ))).ok();
         }
 
@@ -393,7 +490,7 @@ impl NeuMusicApp {
                     self.log.push((w, egui::Color32::YELLOW));
                 }
                 BgMsg::Error(e) => {
-                    let prefix = t(&self.lang, "Ошибка: ", "Error: ");
+                    let prefix = t(&self.lang, "Ошибка: ", "Error: ", "Error: ", "エラー: ", "오류: ", "错误: ", "Erro: ");
                     let msg = format!("{prefix}{e}");
                     self.status = msg.clone();
                     self.log.push((msg, egui::Color32::RED));
@@ -469,7 +566,7 @@ impl Default for NeuMusicApp {
             debloat_enabled: false,
             debloat_bitrate: 0,
             lang: Lang::En,
-            status: "Готов".to_owned(),
+            status: "Ready".to_owned(),
             progress: 0.0,
             busy: false,
             bg_task: None,
@@ -503,27 +600,46 @@ impl eframe::App for NeuMusicApp {
                 ui.horizontal(|ui| {
                     ui.heading("NeuMusic");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(if matches!(self.lang, Lang::Ru) { "EN" } else { "RU" }).clicked() {
-                            self.toggle_lang();
+                        let prev_lang = self.lang;
+                        egui::ComboBox::from_id_salt("lang_selector")
+                            .selected_text(self.lang.label())
+                            .width(120.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.lang, Lang::En, "English");
+                                ui.selectable_value(&mut self.lang, Lang::Ru, "Русский");
+                                ui.selectable_value(&mut self.lang, Lang::Es, "Español");
+                                ui.selectable_value(&mut self.lang, Lang::Ja, "日本語");
+                                ui.selectable_value(&mut self.lang, Lang::Ko, "한국어");
+                                ui.selectable_value(&mut self.lang, Lang::Zh, "中文");
+                                ui.selectable_value(&mut self.lang, Lang::Pt, "Português");
+                            });
+                        if self.lang != prev_lang {
+                            self.on_lang_changed();
                         }
                     });
                 });
 
                 ui.horizontal(|ui| {
                     let url_enabled = self.local_file.is_none();
-                    ui.label(t(&self.lang, "URL:", "URL:"));
+                    ui.label(t(&self.lang, "URL:", "URL:", "URL:", "URL:", "URL:", "URL:", "URL:"));
                     ui.add_enabled(url_enabled, egui::TextEdit::singleline(&mut self.url).desired_width(200.0));
                     if ui.add_enabled(url_enabled, egui::Button::new("Paste")).clicked() {
                         if let Some(text) = paste_from_clipboard() {
                             self.url = text;
-                        } else if self.lang == Lang::Ru {
-                            self.status = "Буфер обмена: установи xclip, xsel или wl-clipboard".to_owned();
                         } else {
-                            self.status = "Clipboard: install xclip, xsel or wl-clipboard".to_owned();
+                            self.status = t(&self.lang,
+                                "Буфер обмена: установи xclip, xsel или wl-clipboard",
+                                "Clipboard: install xclip, xsel or wl-clipboard",
+                                "Portapapeles: instale xclip, xsel o wl-clipboard",
+                                "クリップボード: xclip、xsel、またはwl-clipboardをインストールしてください",
+                                "클립보드: xclip, xsel 또는 wl-clipboard를 설치하세요",
+                                "剪贴板：请安装 xclip、xsel 或 wl-clipboard",
+                                "Área de transferência: instale xclip, xsel ou wl-clipboard",
+                            );
                         }
                     }
                     ui.add(egui::Separator::default().vertical());
-                    if ui.button(t(&self.lang, "📁 Загрузить файл", "📁 Load file")).clicked() {
+                    if ui.button(t(&self.lang, "📁 Загрузить файл", "📁 Load file", "📁 Cargar archivo", "📁 ファイルを読み込む", "📁 파일 불러오기", "📁 加载文件", "📁 Carregar arquivo")).clicked() {
                         self.pick_local_file();
                     }
                 });
@@ -540,23 +656,23 @@ impl eframe::App for NeuMusicApp {
                 }
 
                 ui.horizontal(|ui| {
-                    if ui.button(t(&self.lang, "Обзор...", "Browse...")).clicked() {
+                    if ui.button(t(&self.lang, "Обзор...", "Browse...", "Examinar...", "参照...", "찾아보기...", "浏览...", "Procurar...")).clicked() {
                         self.pick_dir();
                     }
                     ui.label(self.output_dir.to_str().unwrap_or(
-                        &t(&self.lang, "(не выбрано)", "(not selected)"),
+                        &t(&self.lang, "(не выбрано)", "(not selected)", "(no seleccionado)", "(未選択)", "(선택 안 됨)", "(未选择)", "(não selecionado)"),
                     ));
                 });
 
                 ui.separator();
 
-                egui::CollapsingHeader::new(t(&self.lang, "Настройки", "Settings"))
+                egui::CollapsingHeader::new(t(&self.lang, "Настройки", "Settings", "Configuración", "設定", "설정", "设置", "Configurações"))
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.checkbox(
                                 &mut self.convert_192,
-                                t(&self.lang, "Конвертировать аудио", "Convert audio"),
+                                t(&self.lang, "Конвертировать аудио", "Convert audio", "Convertir audio", "音声を変換", "오디오 변환", "转换音频", "Converter áudio"),
                             );
                             if self.convert_192 {
                                 ui.radio_value(&mut self.output_format, OutputFormat::Mp3, "MP3 192kbps");
@@ -566,23 +682,23 @@ impl eframe::App for NeuMusicApp {
 
                         ui.checkbox(
                             &mut self.add_silence,
-                            t(&self.lang, "Добавить тишину в начало", "Add silence at start"),
+                            t(&self.lang, "Добавить тишину в начало", "Add silence at start", "Agregar silencio al inicio", "先頭に無音を追加", "시작 부분에 무음 추가", "在开头添加静音", "Adicionar silêncio no início"),
                         );
                         if self.add_silence {
                             ui.horizontal(|ui| {
-                                ui.label(t(&self.lang, "Длительность (мс):", "Duration (ms):"));
+                                ui.label(t(&self.lang, "Длительность (мс):", "Duration (ms):", "Duración (ms):", "長さ (ミリ秒):", "길이 (ms):", "时长（毫秒）:", "Duração (ms):"));
                                 ui.text_edit_singleline(&mut self.silence_ms);
                             });
                         }
 
                         ui.checkbox(
                             &mut self.playlist,
-                            t(&self.lang, "Скачать весь плейлист", "Download entire playlist"),
+                            t(&self.lang, "Скачать весь плейлист", "Download entire playlist", "Descargar lista de reproducción completa", "プレイリスト全体をダウンロード", "전체 재생목록 다운로드", "下载整个播放列表", "Baixar lista de reprodução inteira"),
                         );
 
                         ui.checkbox(
                             &mut self.debloat_enabled,
-                            t(&self.lang, "Деблоатинг аудио", "Debloat audio"),
+                            t(&self.lang, "Деблоатинг аудио", "Debloat audio", "Reducir tamaño de audio", "オーディオのデブロート", "오디오 디블로팅", "音频去膨胀", "Reduzir tamanho do áudio"),
                         );
                         if self.debloat_enabled {
                             let mut val = self.debloat_bitrate;
@@ -592,27 +708,32 @@ impl eframe::App for NeuMusicApp {
 
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button(t(&self.lang, "Проверить обновления", "Check for updates")).clicked() {
+                            if ui.button(t(&self.lang, "Проверить обновления", "Check for updates", "Buscar actualizaciones", "アップデートを確認", "업데이트 확인", "检查更新", "Verificar atualizações")).clicked() {
                                 self.check_for_updates();
                             }
                             match &self.update_state {
                                 UpdateState::Idle => {}
                                 UpdateState::Checking => {
                                     ui.spinner();
-                                    ui.label(t(&self.lang, "Проверка...", "Checking..."));
+                                    ui.label(t(&self.lang, "Проверка...", "Checking...", "Verificando...", "確認中...", "확인 중...", "检查中...", "Verificando..."));
                                 }
                                 UpdateState::Available(v) => {
                                     ui.colored_label(egui::Color32::YELLOW, &t(
                                         &self.lang,
                                         &format!("Доступно обновление: {}", v),
                                         &format!("Update available: {}", v),
+                                        &format!("Actualización disponible: {}", v),
+                                        &format!("アップデートがあります: {}", v),
+                                        &format!("업데이트 가능: {}", v),
+                                        &format!("有可用更新: {}", v),
+                                        &format!("Atualização disponível: {}", v),
                                     ));
                                     if ui.button("GitHub").clicked() {
                                         open_releases_page();
                                     }
                                 }
                                 UpdateState::Current => {
-                                    ui.colored_label(egui::Color32::GREEN, t(&self.lang, "Последняя версия", "Up to date"));
+                                    ui.colored_label(egui::Color32::GREEN, t(&self.lang, "Последняя версия", "Up to date", "Actualizado", "最新です", "최신 버전입니다", "已是最新", "Atualizado"));
                                 }
                                 UpdateState::Error(e) => {
                                     ui.colored_label(egui::Color32::RED, e);
@@ -627,9 +748,9 @@ impl eframe::App for NeuMusicApp {
                 let has_local = self.local_file.is_some();
                 let can_start = !self.busy && (has_url || has_local) && !self.output_dir.as_os_str().is_empty();
                 let btn_label = if has_local {
-                    t(&self.lang, "Конвертировать", "Convert")
+                    t(&self.lang, "Конвертировать", "Convert", "Convertir", "変換", "변환", "转换", "Converter")
                 } else {
-                    t(&self.lang, "Скачать", "Download")
+                    t(&self.lang, "Скачать", "Download", "Descargar", "ダウンロード", "다운로드", "下载", "Baixar")
                 };
 
                 ui.horizontal(|ui| {
@@ -652,7 +773,7 @@ impl eframe::App for NeuMusicApp {
                     let mut bar = egui::ProgressBar::new(self.progress);
                     if self.progress >= 1.0 {
                         bar = bar.fill(egui::Color32::GREEN)
-                                 .text(egui::RichText::new(t(&self.lang, "✓ Завершено", "✓ Completed"))
+                                 .text(egui::RichText::new(t(&self.lang, "✓ Завершено", "✓ Completed", "✓ Completado", "✓ 完了", "✓ 완료", "✓ 完成", "✓ Concluído"))
                                      .color(egui::Color32::BLACK));
                     } else {
                         bar = bar.show_percentage();
@@ -662,7 +783,7 @@ impl eframe::App for NeuMusicApp {
 
                 if !self.log.is_empty() {
                     ui.separator();
-                    ui.label(t(&self.lang, "Лог:", "Log:"));
+                    ui.label(t(&self.lang, "Лог:", "Log:", "Registro:", "ログ:", "로그:", "日志:", "Registro:"));
                     egui::ScrollArea::vertical()
                         .max_height(150.0)
                         .stick_to_bottom(true)
