@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.1-1
+
+### Changes
+- Bloat detection now compares source vs actual bitrate — warning only shows when
+  conversion actually increased file size (`actual > src_kbps`)
+- Warning message updated: shows source → actual kbps with spectrogram check
+  recommendation
+- `src_kbps` now always measured on raw downloaded file (regardless of convert toggle)
+
+---
+
 ## v1.0.1
 
 ### Bug fixes

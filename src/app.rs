@@ -249,10 +249,8 @@ impl NeuMusicApp {
             tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded"))).ok();
         }
 
-        let src_kbps = if convert {
-            converter::get_actual_bitrate(&current, ffmpeg)
-                .ok().map(|b| b / 1000).unwrap_or(0)
-        } else { 0 };
+        let src_kbps = converter::get_actual_bitrate(&current, ffmpeg)
+            .ok().map(|b| b / 1000).unwrap_or(0);
         let target_kbps = match format { "ogg" => 208, _ => 192 };
 
         if convert {
@@ -334,11 +332,10 @@ impl NeuMusicApp {
         tx.send(BgMsg::Progress(1.0)).ok();
         tx.send(BgMsg::Status(s("  ✓ Готово", "  ✓ Done"))).ok();
 
-        let warn_kbps = if convert && src_kbps > 0 { src_kbps } else { actual };
-        if warn_kbps > 0 && warn_kbps < target_kbps && !debloat {
+        if !debloat && src_kbps > 0 && actual > src_kbps && src_kbps < target_kbps {
             tx.send(BgMsg::Warning(s(
-                &format!("⚠ Низкий битрейт ({} kbps). Включите деблоатинг в настройках и задайте нужный битрейт.", warn_kbps),
-                &format!("⚠ Low bitrate ({} kbps). Enable debloat in settings and set the desired bitrate.", warn_kbps),
+                &format!("⚠ Возможно раздутие аудио: {} → {} kbps. Проверьте спектрограмму вручную.", src_kbps, actual),
+                &format!("⚠ Audio possibly bloated: {} → {} kbps. Manual spectrogram check required.", src_kbps, actual),
             ))).ok();
         }
 
