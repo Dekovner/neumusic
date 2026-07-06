@@ -750,7 +750,7 @@ impl eframe::App for NeuMusicApp {
                 let btn_label = if has_local {
                     t(&self.lang, "Конвертировать", "Convert", "Convertir", "変換", "변환", "转换", "Converter")
                 } else {
-                    t(&self.lang, "Скачать", "Download", "Descargar", "ダウンロード", "다운로드", "下载", "Baixar")
+                    t(&self.lang, "Скачать", "Download", "MATUSABOMBER", "ダウンロード", "다운로드", "下载", "Baixar")
                 };
 
                 ui.horizontal(|ui| {
