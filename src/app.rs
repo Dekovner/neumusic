@@ -44,6 +44,8 @@ pub struct NeuMusicApp {
     bg_task: Option<mpsc::Receiver<BgMsg>>,
 
     log: Vec<(String, egui::Color32)>,
+    update_state: UpdateState,
+    update_rx: Option<mpsc::Receiver<UpdateState>>,
 }
 
 enum BgMsg {
@@ -52,6 +54,14 @@ enum BgMsg {
     Error(String),
     Done,
     Warning(String),
+}
+
+enum UpdateState {
+    Idle,
+    Checking,
+    Available(String),
+    Current,
+    Error(String),
 }
 
 fn t(lang: &Lang, ru: &str, en: &str) -> String {
@@ -95,13 +105,15 @@ fn paste_from_clipboard() -> Option<String> {
 }
 
 impl NeuMusicApp {
-    pub fn new(yt_dlp: PathBuf, ffmpeg: PathBuf) -> Self {
-        let music_dir = dirs_audio_dir().unwrap_or_default();
+    pub fn new(yt_dlp: PathBuf, ffmpeg: PathBuf, saved_dir: Option<String>) -> Self {
+        let output_dir = saved_dir
+            .map(PathBuf::from)
+            .unwrap_or_default();
 
         Self {
             yt_dlp,
             ffmpeg,
-            output_dir: music_dir,
+            output_dir,
             convert_192: true,
             silence_ms: "2000".to_owned(),
             output_format: OutputFormat::Mp3,
@@ -230,13 +242,25 @@ impl NeuMusicApp {
         };
 
         let mut current: PathBuf;
+        let mut local_work_rename: Option<String> = None;
 
         if let Some(local) = local_file {
-            current = local;
-            let name = current.file_name()
+            let name = local.file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("")
+                .unwrap_or("file")
                 .to_owned();
+            let dest = dir.join(&name);
+
+            if dest == local {
+                let work_name = format!("_work_{}", name);
+                let work = dir.join(&work_name);
+                std::fs::copy(&local, &work)?;
+                current = work;
+                local_work_rename = Some(name.clone());
+            } else {
+                std::fs::copy(&local, &dest)?;
+                current = dest;
+            }
             tx.send(BgMsg::Status(s(
                 &format!("▶ Файл: {}", name),
                 &format!("▶ File: {}", name),
@@ -329,6 +353,13 @@ impl NeuMusicApp {
         tx.send(BgMsg::Progress(0.95)).ok();
         tx.send(BgMsg::Status(s("  ✓ Очищено", "  ✓ Cleaned"))).ok();
 
+        if let Some(ref orig_name) = local_work_rename {
+            let final_path = dir.join(orig_name).with_extension(
+                current.extension().unwrap_or_default()
+            );
+            std::fs::rename(&current, &final_path)?;
+        }
+
         tx.send(BgMsg::Progress(1.0)).ok();
         tx.send(BgMsg::Status(s("  ✓ Готово", "  ✓ Done"))).ok();
 
@@ -381,26 +412,45 @@ impl NeuMusicApp {
             self.bg_task = Some(rx);
         }
     }
+
+    fn check_for_updates(&mut self) {
+        self.update_state = UpdateState::Checking;
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        let current = env!("CARGO_PKG_VERSION").to_owned();
+        thread::spawn(move || {
+            let state = (|| -> Result<UpdateState, String> {
+                let resp = ureq::get("https://api.github.com/repos/Dekovner/neumusic/releases/latest")
+                    .set("User-Agent", "neumusic/1.0")
+                    .call()
+                    .map_err(|e| format!("HTTP: {}", e))?;
+                let body = resp.into_string()
+                    .map_err(|e| format!("Read: {}", e))?;
+                let tag = body.split("\"tag_name\":\"")
+                    .nth(1)
+                    .and_then(|s| s.split('"').next())
+                    .unwrap_or("")
+                    .trim_start_matches('v');
+                if tag.is_empty() {
+                    return Err("Parse error".to_owned());
+                }
+                if tag == current {
+                    Ok(UpdateState::Current)
+                } else {
+                    Ok(UpdateState::Available(format!("v{}", tag)))
+                }
+            })();
+            tx.send(state.unwrap_or_else(|e| UpdateState::Error(e))).ok();
+        });
+    }
 }
 
-fn dirs_audio_dir() -> Option<PathBuf> {
+fn open_releases_page() {
+    let url = "https://github.com/Dekovner/neumusic/releases";
     #[cfg(target_os = "windows")]
-    {
-        let profile = std::env::var("USERPROFILE").ok()?;
-        return Some(PathBuf::from(profile).join("Music"));
-    }
+    { let _ = std::process::Command::new("cmd").args(["/c", "start", url]).spawn(); }
     #[cfg(not(target_os = "windows"))]
-    {
-        let home = std::env::var("HOME").ok()?;
-        let xdg = std::env::var("XDG_MUSIC_DIR").unwrap_or_default();
-        if !xdg.is_empty() {
-            let p = PathBuf::from(&xdg);
-            if p.is_absolute() {
-                return Some(p);
-            }
-        }
-        Some(PathBuf::from(home).join("Music"))
-    }
+    { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
 }
 
 impl Default for NeuMusicApp {
@@ -424,6 +474,8 @@ impl Default for NeuMusicApp {
             busy: false,
             bg_task: None,
             log: Vec::new(),
+            update_state: UpdateState::Idle,
+            update_rx: None,
         }
     }
 }
@@ -432,6 +484,13 @@ impl eframe::App for NeuMusicApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_messages(&ctx);
+
+        if let Some(rx) = &self.update_rx {
+            if let Ok(state) = rx.try_recv() {
+                self.update_state = state;
+                self.update_rx = None;
+            }
+        }
 
         if ui.input(|i| i.modifiers.ctrl && i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::V, pressed: true, .. }))) {
             if let Some(text) = paste_from_clipboard() {
@@ -530,6 +589,36 @@ impl eframe::App for NeuMusicApp {
                             ui.add(egui::Slider::new(&mut val, 8..=320).text("kbps"));
                             self.debloat_bitrate = val;
                         }
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button(t(&self.lang, "Проверить обновления", "Check for updates")).clicked() {
+                                self.check_for_updates();
+                            }
+                            match &self.update_state {
+                                UpdateState::Idle => {}
+                                UpdateState::Checking => {
+                                    ui.spinner();
+                                    ui.label(t(&self.lang, "Проверка...", "Checking..."));
+                                }
+                                UpdateState::Available(v) => {
+                                    ui.colored_label(egui::Color32::YELLOW, &t(
+                                        &self.lang,
+                                        &format!("Доступно обновление: {}", v),
+                                        &format!("Update available: {}", v),
+                                    ));
+                                    if ui.button("GitHub").clicked() {
+                                        open_releases_page();
+                                    }
+                                }
+                                UpdateState::Current => {
+                                    ui.colored_label(egui::Color32::GREEN, t(&self.lang, "Последняя версия", "Up to date"));
+                                }
+                                UpdateState::Error(e) => {
+                                    ui.colored_label(egui::Color32::RED, e);
+                                }
+                            }
+                        });
                     });
 
                 ui.separator();
@@ -537,10 +626,15 @@ impl eframe::App for NeuMusicApp {
                 let has_url = !self.url.trim().is_empty();
                 let has_local = self.local_file.is_some();
                 let can_start = !self.busy && (has_url || has_local) && !self.output_dir.as_os_str().is_empty();
+                let btn_label = if has_local {
+                    t(&self.lang, "Конвертировать", "Convert")
+                } else {
+                    t(&self.lang, "Скачать", "Download")
+                };
 
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_start, egui::Button::new(t(&self.lang, "Скачать", "Download")))
+                        .add_enabled(can_start, egui::Button::new(btn_label))
                         .clicked()
                     {
                         self.start_processing(&ctx);
@@ -580,5 +674,11 @@ impl eframe::App for NeuMusicApp {
                 }
             });
         });
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if !self.output_dir.as_os_str().is_empty() {
+            storage.set_string("output_dir", self.output_dir.to_string_lossy().to_string());
+        }
     }
 }

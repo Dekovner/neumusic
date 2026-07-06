@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.1.0
+
+### New features
+- Resizable window (fullscreen support)
+- Check for updates in settings (via GitHub API)
+- Button changes to "Convert" when local file is loaded
+- Output directory persistence between sessions
+
+### Bug fixes
+- Local file in same folder as output dir no longer deletes original
+  (uses `_work_` copy, renames back after processing)
+- Bloat detection now compares source vs actual bitrate
+  (warning only when conversion actually increased file size)
+- `src_kbps` always measured on raw downloaded file
+  (regardless of convert toggle)
+
+### Changes
+- Bloat warning shows source → actual kbps with spectrogram check recommendation
+- Window now resizable
+
+---
+
 ## v1.0.1-1
 
 ### Changes

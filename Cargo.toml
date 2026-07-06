@@ -1,15 +1,16 @@
 [package]
 name = "neumusic"
-version = "1.0.1-1"
+version = "1.1.0"
 edition = "2021"
 
 [build-dependencies]
 embed-resource = "2"
 
 [dependencies]
-eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
 egui = "0.35"
 image = "0.25"
 anyhow = "1"
 rfd = "0.14"
 rust-embed = "8.5"
+ureq = "2.10"

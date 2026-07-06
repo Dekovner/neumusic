@@ -122,7 +122,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([560.0, 380.0])
-            .with_resizable(false)
+            .with_resizable(true)
             .with_icon(load_icon()),
         ..Default::default()
     };
@@ -130,7 +130,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "NeuMusic",
         options,
-        Box::new(move |_cc| Ok(Box::new(neumusic::NeuMusicApp::new(yt_dlp, ffmpeg)))),
+        Box::new(move |cc: &eframe::CreationContext| {
+            let saved_dir = cc.storage.and_then(|s| s.get_string("output_dir"));
+            Ok(Box::new(neumusic::NeuMusicApp::new(yt_dlp, ffmpeg, saved_dir)))
+        }),
     )
 }
 
