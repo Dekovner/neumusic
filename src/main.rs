@@ -130,7 +130,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "NeuMusic",
         options,
-        Box::new(move |_cc| Box::new(neumusic::NeuMusicApp::new(yt_dlp, ffmpeg))),
+        Box::new(move |_cc| Ok(Box::new(neumusic::NeuMusicApp::new(yt_dlp, ffmpeg)))),
     )
 }
 

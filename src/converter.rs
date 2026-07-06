@@ -29,11 +29,17 @@ fn get_sample_rate(path: &Path, ffmpeg: &Path) -> anyhow::Result<u32> {
 }
 
 pub fn get_actual_bitrate(path: &Path, ffmpeg: &Path) -> anyhow::Result<u64> {
-    let s = run_ffprobe(path, ffmpeg, "format=bit_rate")?;
-    s.parse().map_err(|e| anyhow::anyhow!("Не удалось прочитать bitrate: {}", e))
+    let dur = run_ffprobe(path, ffmpeg, "format=duration")?;
+    let secs: f64 = dur.trim().parse()
+        .map_err(|_| anyhow::anyhow!("Не удалось прочитать длительность"))?;
+    let size = std::fs::metadata(path)
+        .map_err(|_| anyhow::anyhow!("Не удалось прочитать размер файла"))?
+        .len();
+    let bps = (size as f64 * 8.0) / secs;
+    Ok(bps as u64)
 }
 
-pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str, bitrate: &str) -> anyhow::Result<PathBuf> {
+pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str) -> anyhow::Result<PathBuf> {
     let ext = match format {
         "mp3" => "mp3",
         "ogg" => "ogg",
@@ -49,13 +55,24 @@ pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str, bitrate: &str) -
         "-y".to_owned(),
         "-i".to_owned(),
         input.to_string_lossy().to_string(),
-        "-b:a".to_owned(),
-        bitrate.to_owned(),
     ];
 
     if format == "ogg" {
+        args.push("-b:a".to_owned());
+        args.push("208k".to_owned());
+        args.push("-maxrate".to_owned());
+        args.push("208k".to_owned());
+        args.push("-bufsize".to_owned());
+        args.push("208k".to_owned());
         args.push("-c:a".to_owned());
         args.push("libvorbis".to_owned());
+    } else {
+        args.push("-b:a".to_owned());
+        args.push("192k".to_owned());
+        args.push("-maxrate".to_owned());
+        args.push("192k".to_owned());
+        args.push("-bufsize".to_owned());
+        args.push("192k".to_owned());
     }
 
     if get_sample_rate(input, ffmpeg).unwrap_or(0) > 48000 {
@@ -75,14 +92,14 @@ pub fn convert_audio(ffmpeg: &Path, input: &Path, format: &str, bitrate: &str) -
         .map_err(|e| anyhow::anyhow!("Не удалось запустить ffmpeg: {}", e))?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!("ffmpeg: ошибка конвертации в {} kbps {}", bitrate.trim_end_matches('k'), ext));
+        return Err(anyhow::anyhow!("ffmpeg: ошибка конвертации"));
     }
 
     std::fs::remove_file(input)?;
     Ok(output)
 }
 
-pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64, format: &str, bitrate: &str) -> anyhow::Result<PathBuf> {
+pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64, format: &str) -> anyhow::Result<PathBuf> {
     let ext = match format {
         "mp3" => "mp3",
         "ogg" => "ogg",
@@ -96,12 +113,24 @@ pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64, format: &str, bitrate: 
         "-y".to_owned(),
         "-i".to_owned(),
         input.to_string_lossy().to_string(),
-        "-b:a".to_owned(),
-        bitrate.to_owned(),
     ];
+
     if format == "ogg" {
+        args.push("-b:a".to_owned());
+        args.push("208k".to_owned());
+        args.push("-maxrate".to_owned());
+        args.push("208k".to_owned());
+        args.push("-bufsize".to_owned());
+        args.push("208k".to_owned());
         args.push("-c:a".to_owned());
         args.push("libvorbis".to_owned());
+    } else {
+        args.push("-b:a".to_owned());
+        args.push("192k".to_owned());
+        args.push("-maxrate".to_owned());
+        args.push("192k".to_owned());
+        args.push("-bufsize".to_owned());
+        args.push("192k".to_owned());
     }
 
     if get_sample_rate(input, ffmpeg).unwrap_or(0) > 48000 {
@@ -132,30 +161,80 @@ pub fn add_silence(ffmpeg: &Path, input: &Path, ms: u64, format: &str, bitrate: 
     Ok(output)
 }
 
+pub fn debloat(ffmpeg: &Path, input: &Path, format: &str, max_kbps: u64) -> anyhow::Result<PathBuf> {
+    if max_kbps == 0 {
+        return Ok(input.to_path_buf());
+    }
+
+    let ext = match format {
+        "mp3" => "mp3",
+        "ogg" => "ogg",
+        _ => return Err(anyhow::anyhow!("Unknown format: {}", format)),
+    };
+
+    let bitrate_str = format!("{}k", max_kbps);
+    let tmp = input.with_extension(format!("debloat.{ext}"));
+
+    let mut args: Vec<String> = vec![
+        "-y".to_owned(),
+        "-i".to_owned(),
+        input.to_string_lossy().to_string(),
+        "-b:a".to_owned(),
+        bitrate_str,
+    ];
+    if format == "ogg" {
+        args.push("-c:a".to_owned());
+        args.push("libvorbis".to_owned());
+    }
+    args.push(tmp.to_string_lossy().to_string());
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(&args)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000);
+    let status = cmd.status()
+        .map_err(|e| anyhow::anyhow!("Не удалось запустить ffmpeg: {}", e))?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!("ffmpeg: ошибка деблоатинга"));
+    }
+
+    std::fs::remove_file(input)?;
+    let output = input.with_extension(ext);
+    std::fs::rename(&tmp, &output)?;
+    Ok(output)
+}
+
 
 const CLEANUP_EXTS: &[&str] = &[
     "m4a", "webm", "opus", "mka", "ogg", "aac", "wav", "flac",
 ];
 
 pub fn cleanup(dir: &Path, keep: &Path, format: &str) {
-    let keep_stem = keep.file_stem();
+    let keep_stem = keep.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path == keep {
                 continue;
             }
-            let is_temp = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| CLEANUP_EXTS.contains(&ext))
-                .unwrap_or(false);
-            let is_silence_tmp = keep_stem.is_some()
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(&format!(".silence.{}", format)));
-            if is_temp || is_silence_tmp {
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if !name.starts_with(keep_stem) {
+                continue;
+            }
+            let ext = path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let is_temp = CLEANUP_EXTS.contains(&ext);
+            let is_silence_tmp = name.ends_with(&format!(".silence.{}", format));
+            let is_debloat_tmp = name.ends_with(&format!(".debloat.{}", format));
+            if is_temp || is_silence_tmp || is_debloat_tmp {
                 let _ = std::fs::remove_file(&path);
             }
         }

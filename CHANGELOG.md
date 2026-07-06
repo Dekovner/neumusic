@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.0.1
+
+### Bug fixes
+- Accurate bitrate detection — `get_actual_bitrate()` now uses `filesize * 8 / duration` instead of unreliable `format.bit_rate` for ABR/VBR
+- Bitrate warning now compares source bitrate (not final ABR-upconverted file) with target cap — fixes bloat detection on SoundCloud
+- Cleanup no longer deletes unrelated files in output dir — scoped to same filename stem only
+- Warning not showing when convert=ON fixed (was comparing final upscaled bitrate)
+- Final bitrate measurement moved to end of pipeline (after all processing)
+
+### UI improvements
+- Log entries are now colored: normal=white, warning=yellow, errors=red
+- Warning moved from separate yellow label into log (maintains yellow color)
+- Log auto-scrolls to bottom on new entries
+- URL + Load file merged into one row with vertical separator
+- Separate row for loaded filename + ✕ (always visible, no overflow)
+- URL field disabled (greyed) when local file is loaded
+- URL field width capped at 200px
+- Filename truncated with `…` when too long
+
+### Pipeline order
+- Silence applied BEFORE debloat: convert → silence → debloat → cleanup
+
+### Platform
+- Windows EXE and Linux AppImage rebuilt with all fixes
+
+---
+
 ## v1.0.0
 
 ### New features
@@ -9,9 +36,11 @@
 - Sample rate enforcement (auto-downscale to 48kHz if exceeded)
 - DRM fallback: retry with `--extractor-args soundcloud:formats=*`
 - Dynamic conversion log (shows actual format and bitrate)
-- No upscaling: conversion uses `min(source_bitrate, target_bitrate)` for both MP3 and OGG
+- ABR bitrate capping: no floor, never exceeds 192k (MP3) / 208k (OGG)
+- No upscaling: conversion uses ABR with `-maxrate` instead of CBR/VBR floors
 - Displays actual average bitrate of downloaded audio in log
 - Green progress bar at 100%
+- Low-bitrate warning (yellow) when actual < 192kbps and debloat is off
 
 ### Bug fixes
 - Fixed double lossy encoding — removed `--audio-format mp3` from yt-dlp args
@@ -26,10 +55,15 @@
 - Non-resizable window
 - Removed spinner animation from progress bar
 - Clearer error message on DRM-protected content
+- Settings moved to CollapsingHeader (no separate window)
+- Debloat is off by default (must be explicitly enabled)
+- debloat_bitrate changed to u32 Slider (8..=320 kbps) instead of TextEdit
 
 ### Platform
 - Windows: hidden console windows for yt-dlp, ffmpeg, ffprobe, powershell (`CREATE_NO_WINDOW`)
 - accesskit disabled to fix Wine/Proton crashes
+- Wayland support: `WINIT_UNIX_BACKEND=wayland` in AppRun, egui/eframe 0.35
+- Linux paste via `xclip`/`xsel`/`wl-paste` instead of `arboard`
 
 ---
 

@@ -27,19 +27,23 @@ pub struct NeuMusicApp {
     url: String,
     output_dir: PathBuf,
 
+    local_file: Option<PathBuf>,
+
     convert_192: bool,
+    output_format: OutputFormat,
     add_silence: bool,
     silence_ms: String,
     playlist: bool,
+    debloat_enabled: bool,
+    debloat_bitrate: u32,
 
-    output_format: OutputFormat,
     lang: Lang,
     status: String,
     progress: f32,
     busy: bool,
     bg_task: Option<mpsc::Receiver<BgMsg>>,
 
-    log: Vec<String>,
+    log: Vec<(String, egui::Color32)>,
 }
 
 enum BgMsg {
@@ -47,6 +51,7 @@ enum BgMsg {
     Progress(f32),
     Error(String),
     Done,
+    Warning(String),
 }
 
 fn t(lang: &Lang, ru: &str, en: &str) -> String {
@@ -100,10 +105,12 @@ impl NeuMusicApp {
             convert_192: true,
             silence_ms: "2000".to_owned(),
             output_format: OutputFormat::Mp3,
+            debloat_enabled: false,
+            debloat_bitrate: 0,
             lang: Lang::En,
             status: "Ready".to_owned(),
             progress: 0.0,
-            log: vec!["Ready".to_owned()],
+            log: vec![("Ready".to_owned(), egui::Color32::WHITE)],
             ..Default::default()
         }
     }
@@ -112,12 +119,12 @@ impl NeuMusicApp {
         self.lang = match self.lang {
             Lang::En => {
                 self.status = "Готов".to_owned();
-                self.log = vec!["Готов".to_owned()];
+                self.log = vec![("Готов".to_owned(), egui::Color32::WHITE)];
                 Lang::Ru
             }
             Lang::Ru => {
                 self.status = "Ready".to_owned();
-                self.log = vec!["Ready".to_owned()];
+                self.log = vec![("Ready".to_owned(), egui::Color32::WHITE)];
                 Lang::En
             }
         };
@@ -129,11 +136,34 @@ impl NeuMusicApp {
         }
     }
 
-    fn start_download(&mut self, ctx: &egui::Context) {
-        if self.url.trim().is_empty() || self.output_dir.as_os_str().is_empty() {
-            self.status = t(&self.lang, 
-                "Заполните URL и выберите папку.",
-                "Fill in URL and select a folder.",
+    fn pick_local_file(&mut self) {
+        if let Some(path) = FileDialog::new()
+            .add_filter("Audio", &["mp3", "m4a", "webm", "opus", "mka", "ogg", "aac", "wav", "flac", "wma"])
+            .pick_file()
+        {
+            self.local_file = Some(path);
+        }
+    }
+
+    fn clear_local_file(&mut self) {
+        self.local_file = None;
+    }
+
+    fn start_processing(&mut self, ctx: &egui::Context) {
+        let has_url = !self.url.trim().is_empty();
+        let has_local = self.local_file.is_some();
+
+        if !has_url && !has_local {
+            self.status = t(&self.lang,
+                "Введите URL или выберите локальный файл.",
+                "Enter URL or select a local file.",
+            );
+            return;
+        }
+        if self.output_dir.as_os_str().is_empty() {
+            self.status = t(&self.lang,
+                "Выберите папку для сохранения.",
+                "Select an output folder.",
             );
             return;
         }
@@ -142,7 +172,7 @@ impl NeuMusicApp {
         self.progress = 0.0;
         self.log.clear();
         self.status = t(&self.lang, "Загрузка...", "Downloading...");
-        self.log.push(t(&self.lang, "Загрузка...", "Downloading..."));
+        self.log.push((t(&self.lang, "Загрузка...", "Downloading..."), egui::Color32::WHITE));
 
         let yt_dlp = self.yt_dlp.clone();
         let ffmpeg = self.ffmpeg.clone();
@@ -156,6 +186,9 @@ impl NeuMusicApp {
         let silence = self.add_silence;
         let ms: u64 = self.silence_ms.parse().unwrap_or(2000);
         let playlist = self.playlist;
+        let debloat = self.debloat_enabled;
+        let debloat_bitrate = self.debloat_bitrate;
+        let local_file = self.local_file.clone();
         let lang_is_en = matches!(self.lang, Lang::En);
 
         let (tx, rx) = mpsc::channel();
@@ -163,7 +196,9 @@ impl NeuMusicApp {
 
         thread::spawn(move || {
             let result = Self::run_pipeline(
-                &yt_dlp, &ffmpeg, &url, &dir, convert, &format_str, silence, ms, playlist, lang_is_en, &tx,
+                &yt_dlp, &ffmpeg, &url, &dir,
+                convert, &format_str, silence, ms, playlist, debloat, debloat_bitrate as u64, local_file,
+                lang_is_en, &tx,
             );
             match result {
                 Ok(()) => tx.send(BgMsg::Done).ok(),
@@ -184,106 +219,129 @@ impl NeuMusicApp {
         silence: bool,
         ms: u64,
         playlist: bool,
+        debloat: bool,
+        debloat_bitrate: u64,
+        local_file: Option<PathBuf>,
         en: bool,
         tx: &mpsc::Sender<BgMsg>,
     ) -> anyhow::Result<()> {
         let s = |ru: &str, en_str: &str| -> String {
-            if en {
-                en_str.to_owned()
-            } else {
-                ru.to_owned()
-            }
+            if en { en_str.to_owned() } else { ru.to_owned() }
         };
 
-        tx.send(BgMsg::Progress(0.05)).ok();
-        tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading..."))).ok();
-        let first = downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?;
-        tx.send(BgMsg::Progress(0.30)).ok();
-        let src_kbps = converter::get_actual_bitrate(&first, ffmpeg).ok().map(|b| b / 1000).unwrap_or(0);
-        let bitrate_str = if src_kbps > 0 {
-            format!("{}k", src_kbps)
+        let mut current: PathBuf;
+
+        if let Some(local) = local_file {
+            current = local;
+            let name = current.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_owned();
+            tx.send(BgMsg::Status(s(
+                &format!("▶ Файл: {}", name),
+                &format!("▶ File: {}", name),
+            ))).ok();
         } else {
-            String::new()
-        };
-        tx.send(BgMsg::Status(if src_kbps > 0 {
-            s(
-                &format!("  ✓ Скачано ({} kbps avg)", src_kbps),
-                &format!("  ✓ Downloaded ({} kbps avg)", src_kbps),
-            )
-        } else {
-            s("  ✓ Скачано", "  ✓ Downloaded")
-        })).ok();
-        let mut current = first;
+            tx.send(BgMsg::Progress(0.05)).ok();
+            tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading..."))).ok();
+            current = downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?;
+            tx.send(BgMsg::Progress(0.30)).ok();
+            tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded"))).ok();
+        }
+
+        let src_kbps = if convert {
+            converter::get_actual_bitrate(&current, ffmpeg)
+                .ok().map(|b| b / 1000).unwrap_or(0)
+        } else { 0 };
+        let target_kbps = match format { "ogg" => 208, _ => 192 };
 
         if convert {
-            let target_kbps = match format {
-                "ogg" => 208,
-                _ => 192,
-            };
-            let effective_kbps = if src_kbps > 0 {
-                src_kbps.min(target_kbps)
+            let codec_label = match format { "ogg" => "OGG", _ => "MP3" };
+            let progress_start = if current.extension().map_or(false, |e| e == "mp3" || e == "ogg") {
+                0.40
             } else {
-                target_kbps
+                0.10
             };
-            let effective_bitrate = format!("{}k", effective_kbps);
-            let codec_label = match format {
-                "ogg" => "OGG",
-                _ => "MP3",
-            };
-            tx.send(BgMsg::Progress(0.40)).ok();
+            tx.send(BgMsg::Progress(progress_start)).ok();
             tx.send(BgMsg::Status(s(
-                &format!("▶ Конвертация в {} kbps ({})...", effective_kbps, codec_label),
-                &format!("▶ Converting to {} kbps ({})...", effective_kbps, codec_label),
-            )))
-            .ok();
-            current = converter::convert_audio(ffmpeg, &current, format, &effective_bitrate)?;
+                &format!("▶ Конвертация в {} kbps ({})...", target_kbps, codec_label),
+                &format!("▶ Converting to {} kbps ({})...", target_kbps, codec_label),
+            ))).ok();
+            current = converter::convert_audio(ffmpeg, &current, format)?;
             tx.send(BgMsg::Progress(0.60)).ok();
-            tx.send(BgMsg::Status(s(
-                "  ✓ Конвертировано",
-                "  ✓ Converted",
-            )))
-            .ok();
+
+            if let Ok(bps) = converter::get_actual_bitrate(&current, ffmpeg) {
+                let kbps = (bps / 1000) as u64;
+                tx.send(BgMsg::Status(s(
+                    &format!("  ✓ Конвертировано ({} kbps avg)", kbps),
+                    &format!("  ✓ Converted ({} kbps avg)", kbps),
+                ))).ok();
+            } else {
+                tx.send(BgMsg::Status(s(
+                    "  ✓ Конвертировано",
+                    "  ✓ Converted",
+                ))).ok();
+            }
         }
 
         if silence {
-            let silence_bitrate = if convert {
-                let target_kbps = match format { "ogg" => 208, _ => 192 };
-                let effective_kbps = if src_kbps > 0 { src_kbps.min(target_kbps) } else { target_kbps };
-                format!("{}k", effective_kbps)
-            } else {
-                String::new()
-            };
-            tx.send(BgMsg::Progress(0.70)).ok();
+            tx.send(BgMsg::Progress(0.65)).ok();
             tx.send(BgMsg::Status(s(
                 "▶ Добавление тишины...",
                 "▶ Adding silence...",
-            )))
-            .ok();
-            if convert {
-                current = converter::add_silence(ffmpeg, &current, ms, format, &silence_bitrate)?;
-            } else {
-                current = converter::add_silence(ffmpeg, &current, ms, format, &bitrate_str)?;
-            }
-            tx.send(BgMsg::Progress(0.85)).ok();
+            ))).ok();
+            current = converter::add_silence(ffmpeg, &current, ms, format)?;
+            tx.send(BgMsg::Progress(0.80)).ok();
             tx.send(BgMsg::Status(s(
                 "  ✓ Тишина добавлена",
                 "  ✓ Silence added",
-            )))
-            .ok();
+            ))).ok();
+        }
+
+        if debloat && debloat_bitrate > 0 {
+            let max_kbps = debloat_bitrate;
+            tx.send(BgMsg::Progress(0.85)).ok();
+            tx.send(BgMsg::Status(s(
+                &format!("▶ Деблоатинг: cap {} kbps...", max_kbps),
+                &format!("▶ Debloat: cap {} kbps...", max_kbps),
+            ))).ok();
+            current = converter::debloat(ffmpeg, &current, format, max_kbps)?;
+            tx.send(BgMsg::Progress(0.92)).ok();
+            tx.send(BgMsg::Status(s(
+                &format!("  ✓ Деблоатинг завершён ({} kbps)", max_kbps),
+                &format!("  ✓ Debloat done ({} kbps)", max_kbps),
+            ))).ok();
+        }
+
+        let actual = converter::get_actual_bitrate(&current, ffmpeg)
+            .ok().map(|b| b / 1000).unwrap_or(0);
+        if actual > 0 {
+            tx.send(BgMsg::Status(s(
+                &format!("  ✓ Итоговый битрейт: {} kbps", actual),
+                &format!("  ✓ Final bitrate: {} kbps", actual),
+            ))).ok();
         }
 
         tx.send(BgMsg::Progress(0.90)).ok();
         tx.send(BgMsg::Status(s(
             "▶ Очистка временных файлов...",
             "▶ Cleaning temp files...",
-        )))
-        .ok();
+        ))).ok();
         converter::cleanup(dir, &current, format);
         tx.send(BgMsg::Progress(0.95)).ok();
         tx.send(BgMsg::Status(s("  ✓ Очищено", "  ✓ Cleaned"))).ok();
 
         tx.send(BgMsg::Progress(1.0)).ok();
         tx.send(BgMsg::Status(s("  ✓ Готово", "  ✓ Done"))).ok();
+
+        let warn_kbps = if convert && src_kbps > 0 { src_kbps } else { actual };
+        if warn_kbps > 0 && warn_kbps < target_kbps && !debloat {
+            tx.send(BgMsg::Warning(s(
+                &format!("⚠ Низкий битрейт ({} kbps). Включите деблоатинг в настройках и задайте нужный битрейт.", warn_kbps),
+                &format!("⚠ Low bitrate ({} kbps). Enable debloat in settings and set the desired bitrate.", warn_kbps),
+            ))).ok();
+        }
+
         Ok(())
     }
 
@@ -298,16 +356,19 @@ impl NeuMusicApp {
             match msg {
                 BgMsg::Status(s) => {
                     self.status = s.clone();
-                    self.log.push(s);
+                    self.log.push((s, egui::Color32::WHITE));
                 }
                 BgMsg::Progress(p) => {
                     self.progress = p;
+                }
+                BgMsg::Warning(w) => {
+                    self.log.push((w, egui::Color32::YELLOW));
                 }
                 BgMsg::Error(e) => {
                     let prefix = t(&self.lang, "Ошибка: ", "Error: ");
                     let msg = format!("{prefix}{e}");
                     self.status = msg.clone();
-                    self.log.push(msg);
+                    self.log.push((msg, egui::Color32::RED));
                     should_end = true;
                 }
                 BgMsg::Done => {
@@ -352,11 +413,14 @@ impl Default for NeuMusicApp {
             ffmpeg: PathBuf::new(),
             url: String::new(),
             output_dir: PathBuf::new(),
+            local_file: None,
             convert_192: true,
             output_format: OutputFormat::Mp3,
             add_silence: false,
             silence_ms: "2000".to_owned(),
             playlist: false,
+            debloat_enabled: false,
+            debloat_bitrate: 0,
             lang: Lang::En,
             status: "Готов".to_owned(),
             progress: 0.0,
@@ -368,16 +432,17 @@ impl Default for NeuMusicApp {
 }
 
 impl eframe::App for NeuMusicApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_messages(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.handle_messages(&ctx);
 
-        if ctx.input(|i| i.modifiers.ctrl && i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::V, pressed: true, .. }))) {
+        if ui.input(|i| i.modifiers.ctrl && i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::V, pressed: true, .. }))) {
             if let Some(text) = paste_from_clipboard() {
                 self.url = text;
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("NeuMusic");
@@ -389,9 +454,10 @@ impl eframe::App for NeuMusicApp {
                 });
 
                 ui.horizontal(|ui| {
+                    let url_enabled = self.local_file.is_none();
                     ui.label(t(&self.lang, "URL:", "URL:"));
-                    ui.text_edit_singleline(&mut self.url);
-                    if ui.button("Paste").clicked() {
+                    ui.add_enabled(url_enabled, egui::TextEdit::singleline(&mut self.url).desired_width(200.0));
+                    if ui.add_enabled(url_enabled, egui::Button::new("Paste")).clicked() {
                         if let Some(text) = paste_from_clipboard() {
                             self.url = text;
                         } else if self.lang == Lang::Ru {
@@ -400,7 +466,22 @@ impl eframe::App for NeuMusicApp {
                             self.status = "Clipboard: install xclip, xsel or wl-clipboard".to_owned();
                         }
                     }
+                    ui.add(egui::Separator::default().vertical());
+                    if ui.button(t(&self.lang, "📁 Загрузить файл", "📁 Load file")).clicked() {
+                        self.pick_local_file();
+                    }
                 });
+
+                if let Some(ref path) = self.local_file.clone() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                        ).truncate());
+                        if ui.button("✕").clicked() {
+                            self.clear_local_file();
+                        }
+                    });
+                }
 
                 ui.horizontal(|ui| {
                     if ui.button(t(&self.lang, "Обзор...", "Browse...")).clicked() {
@@ -413,45 +494,59 @@ impl eframe::App for NeuMusicApp {
 
                 ui.separator();
 
-                ui.horizontal(|ui| {
-                    ui.checkbox(
-                        &mut self.convert_192,
-                        t(&self.lang, "Конвертировать аудио", "Convert audio"),
-                    );
-                    if self.convert_192 {
-                        ui.radio_value(&mut self.output_format, OutputFormat::Mp3, "MP3 192kbps");
-                        ui.radio_value(&mut self.output_format, OutputFormat::Ogg, "OGG 208kbps");
-                    }
-                });
+                egui::CollapsingHeader::new(t(&self.lang, "Настройки", "Settings"))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(
+                                &mut self.convert_192,
+                                t(&self.lang, "Конвертировать аудио", "Convert audio"),
+                            );
+                            if self.convert_192 {
+                                ui.radio_value(&mut self.output_format, OutputFormat::Mp3, "MP3 192kbps");
+                                ui.radio_value(&mut self.output_format, OutputFormat::Ogg, "OGG 208kbps");
+                            }
+                        });
 
-                ui.checkbox(
-                    &mut self.add_silence,
-                    t(&self.lang, "Добавить тишину в начало", "Add silence at start"),
-                );
-                if self.add_silence {
-                    ui.horizontal(|ui| {
-                        ui.label(t(&self.lang, "Длительность (мс):", "Duration (ms):"));
-                        ui.text_edit_singleline(&mut self.silence_ms);
+                        ui.checkbox(
+                            &mut self.add_silence,
+                            t(&self.lang, "Добавить тишину в начало", "Add silence at start"),
+                        );
+                        if self.add_silence {
+                            ui.horizontal(|ui| {
+                                ui.label(t(&self.lang, "Длительность (мс):", "Duration (ms):"));
+                                ui.text_edit_singleline(&mut self.silence_ms);
+                            });
+                        }
+
+                        ui.checkbox(
+                            &mut self.playlist,
+                            t(&self.lang, "Скачать весь плейлист", "Download entire playlist"),
+                        );
+
+                        ui.checkbox(
+                            &mut self.debloat_enabled,
+                            t(&self.lang, "Деблоатинг аудио", "Debloat audio"),
+                        );
+                        if self.debloat_enabled {
+                            let mut val = self.debloat_bitrate;
+                            ui.add(egui::Slider::new(&mut val, 8..=320).text("kbps"));
+                            self.debloat_bitrate = val;
+                        }
                     });
-                }
-
-                ui.checkbox(
-                    &mut self.playlist,
-                    t(&self.lang, "Скачать весь плейлист", "Download entire playlist"),
-                );
 
                 ui.separator();
 
-                let can_start = !self.busy
-                    && !self.url.trim().is_empty()
-                    && !self.output_dir.as_os_str().is_empty();
+                let has_url = !self.url.trim().is_empty();
+                let has_local = self.local_file.is_some();
+                let can_start = !self.busy && (has_url || has_local) && !self.output_dir.as_os_str().is_empty();
 
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(can_start, egui::Button::new(t(&self.lang, "Скачать", "Download")))
                         .clicked()
                     {
-                        self.start_download(ctx);
+                        self.start_processing(&ctx);
                     }
                     if self.busy {
                         ui.spinner();
@@ -463,9 +558,13 @@ impl eframe::App for NeuMusicApp {
                 });
 
                 if self.progress > 0.0 {
-                    let mut bar = egui::ProgressBar::new(self.progress).show_percentage();
+                    let mut bar = egui::ProgressBar::new(self.progress);
                     if self.progress >= 1.0 {
-                        bar = bar.fill(egui::Color32::GREEN);
+                        bar = bar.fill(egui::Color32::GREEN)
+                                 .text(egui::RichText::new(t(&self.lang, "✓ Завершено", "✓ Completed"))
+                                     .color(egui::Color32::BLACK));
+                    } else {
+                        bar = bar.show_percentage();
                     }
                     ui.add(bar);
                 }
@@ -477,8 +576,8 @@ impl eframe::App for NeuMusicApp {
                         .max_height(150.0)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            for line in &self.log {
-                                ui.label(line);
+                            for (text, color) in &self.log {
+                                ui.colored_label(*color, text);
                             }
                         });
                 }

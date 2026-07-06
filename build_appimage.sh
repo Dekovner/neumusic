@@ -21,12 +21,47 @@ echo "=== Building release binary ==="
 cargo build --release
 
 echo "=== Building AppImage ==="
-if ! command -v cargo-appimage &>/dev/null; then
-    echo "Installing cargo-appimage..."
-    cargo install cargo-appimage
+if ! command -v appimagetool &>/dev/null; then
+    echo "Installing appimagetool..."
+    if command -v cargo-appimage &>/dev/null; then
+        # extract appimagetool from cargo-appimage install
+        APPIMAGETOOL=$(which appimagetool 2>/dev/null || echo "")
+        if [ -z "$APPIMAGETOOL" ]; then
+            echo "appimagetool not found, installing via cargo..."
+            cargo install appimagetool 2>/dev/null || true
+        fi
+    fi
 fi
 
-cargo appimage
+APPDIR="target/neumusic.AppDir"
+rm -rf "$APPDIR"
+
+mkdir -p "$APPDIR/usr/bin"
+cp "target/release/neumusic" "$APPDIR/usr/bin/"
+
+cat > "$APPDIR/AppRun" << 'EOF'
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "$0")")"
+export WINIT_UNIX_BACKEND=wayland
+exec "$HERE/usr/bin/neumusic" "$@"
+EOF
+chmod +x "$APPDIR/AppRun"
+
+cat > "$APPDIR/neumusic.desktop" << EOF
+[Desktop Entry]
+Name=NeuMusic
+Exec=neumusic
+Icon=neumusic
+Type=Application
+Categories=AudioVideo;
+EOF
+
+cp neumusic.png "$APPDIR/"
+
+mkdir -p target/appimage
+appimagetool "$APPDIR" "target/appimage/neumusic.AppImage"
+
+rm -rf "$APPDIR"
 
 echo ""
 echo "Done! AppImage created at: target/appimage/neumusic.AppImage"
