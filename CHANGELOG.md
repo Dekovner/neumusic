@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.2
+
+### Removed
+- Download best audio checkbox — convert/silence/debloat are no longer gated by it
+
+---
+
 ## v1.2.1
 
 ### New features

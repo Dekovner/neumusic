@@ -84,3 +84,21 @@ pub fn find_newest_audio(dir: &Path) -> Option<PathBuf> {
         })
         .map(|e| e.path())
 }
+
+pub fn find_all_audio(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir).ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| AUDIO_EXTS.contains(&ext))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path())
+        .collect();
+    files.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    files
+}

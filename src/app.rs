@@ -283,25 +283,36 @@ impl NeuMusicApp {
             }.to_owned()
         };
 
-        let mut current: PathBuf;
         let mut local_work_rename: Option<String> = None;
+        let has_local = local_file.is_some();
 
-        if let Some(local) = local_file {
+        let snapshot: std::collections::HashSet<String> = if playlist && !has_local {
+            std::fs::read_dir(dir).ok()
+                .into_iter().flatten()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str().map(String::from))
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        let first_current: Option<PathBuf>;
+        if let Some(ref local) = local_file {
             let name = local.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("file")
                 .to_owned();
             let dest = dir.join(&name);
 
-            if dest == local {
+            if dest == *local {
                 let work_name = format!("_work_{}", name);
                 let work = dir.join(&work_name);
-                std::fs::copy(&local, &work)?;
-                current = work;
+                std::fs::copy(local, &work)?;
+                first_current = Some(work);
                 local_work_rename = Some(name.clone());
             } else {
-                std::fs::copy(&local, &dest)?;
-                current = dest;
+                std::fs::copy(local, &dest)?;
+                first_current = Some(dest);
             }
             tx.send(BgMsg::Status(s(
                 &format!("▶ Файл: {}", name),
@@ -315,157 +326,170 @@ impl NeuMusicApp {
         } else {
             tx.send(BgMsg::Progress(0.05)).ok();
             tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading...", "▶ Descargando...", "▶ ダウンロード中...", "▶ 다운로드 중...", "▶ 下载中...", "▶ Baixando..."))).ok();
-            current = downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?;
+            first_current = Some(downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?);
             tx.send(BgMsg::Progress(0.30)).ok();
             tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded", "  ✓ Descargado", "  ✓ ダウンロード完了", "  ✓ 다운로드 완료", "  ✓ 下载完成", "  ✓ Baixado"))).ok();
         }
 
-        let src_kbps = converter::get_actual_bitrate(&current, ffmpeg)
-            .ok().map(|b| b / 1000).unwrap_or(0);
+        let files: Vec<PathBuf> = if has_local {
+            vec![first_current.unwrap()]
+        } else if playlist {
+            downloader::find_all_audio(dir)
+                .into_iter()
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| !snapshot.contains(n))
+                        .unwrap_or(false)
+                })
+                .collect()
+        } else {
+            vec![first_current.unwrap()]
+        };
+
         let target_kbps = match format { "ogg" => 208, _ => 192 };
+        let total = files.len();
+        let mut processed_first: Option<PathBuf> = None;
 
-        if convert {
-            let codec_label = match format { "ogg" => "OGG", _ => "MP3" };
-            let progress_start = if current.extension().map_or(false, |e| e == "mp3" || e == "ogg") {
-                0.40
-            } else {
-                0.10
-            };
-            tx.send(BgMsg::Progress(progress_start)).ok();
-            tx.send(BgMsg::Status(s(
-                &format!("▶ Конвертация в {} kbps ({})...", target_kbps, codec_label),
-                &format!("▶ Converting to {} kbps ({})...", target_kbps, codec_label),
-                &format!("▶ Convirtiendo a {} kbps ({})...", target_kbps, codec_label),
-                &format!("▶ {} kbps ({}) に変換中...", target_kbps, codec_label),
-                &format!("▶ {} kbps ({}) 변환 중...", target_kbps, codec_label),
-                &format!("▶ 正在转换为 {} kbps ({})...", target_kbps, codec_label),
-                &format!("▶ Convertendo para {} kbps ({})...", target_kbps, codec_label),
-            ))).ok();
-            current = converter::convert_audio(ffmpeg, &current, format)?;
-            tx.send(BgMsg::Progress(0.60)).ok();
+        for (idx, input) in files.iter().enumerate() {
+            let mut current = input.clone();
 
-            if let Ok(bps) = converter::get_actual_bitrate(&current, ffmpeg) {
-                let kbps = (bps / 1000) as u64;
+            let src_kbps = converter::get_actual_bitrate(&current, ffmpeg)
+                .ok().map(|b| b / 1000).unwrap_or(0);
+
+            if convert {
+                let codec_label = match format { "ogg" => "OGG", _ => "MP3" };
+                tx.send(BgMsg::Progress(
+                    0.30 + (idx as f32 / total as f32) * 0.65
+                )).ok();
                 tx.send(BgMsg::Status(s(
-                    &format!("  ✓ Конвертировано ({} kbps avg)", kbps),
-                    &format!("  ✓ Converted ({} kbps avg)", kbps),
-                    &format!("  ✓ Convertido ({} kbps promedio)", kbps),
-                    &format!("  ✓ 変換完了 (平均 {} kbps)", kbps),
-                    &format!("  ✓ 변환 완료 (평균 {} kbps)", kbps),
-                    &format!("  ✓ 转换完成（平均 {} kbps）", kbps),
-                    &format!("  ✓ Convertido (média {} kbps)", kbps),
+                    &format!("▶ Конвертация в {} kbps ({})...", target_kbps, codec_label),
+                    &format!("▶ Converting to {} kbps ({})...", target_kbps, codec_label),
+                    &format!("▶ Convirtiendo a {} kbps ({})...", target_kbps, codec_label),
+                    &format!("▶ {} kbps ({}) に変換中...", target_kbps, codec_label),
+                    &format!("▶ {} kbps ({}) 변환 중...", target_kbps, codec_label),
+                    &format!("▶ 正在转换为 {} kbps ({})...", target_kbps, codec_label),
+                    &format!("▶ Convertendo para {} kbps ({})...", target_kbps, codec_label),
                 ))).ok();
-            } else {
+                current = converter::convert_audio(ffmpeg, &current, format)?;
+
+                if let Ok(bps) = converter::get_actual_bitrate(&current, ffmpeg) {
+                    let kbps = (bps / 1000) as u64;
+                    tx.send(BgMsg::Status(s(
+                        &format!("  ✓ Конвертировано ({} kbps avg)", kbps),
+                        &format!("  ✓ Converted ({} kbps avg)", kbps),
+                        &format!("  ✓ Convertido ({} kbps promedio)", kbps),
+                        &format!("  ✓ 変換完了 (平均 {} kbps)", kbps),
+                        &format!("  ✓ 변환 완료 (평균 {} kbps)", kbps),
+                        &format!("  ✓ 转换完成（平均 {} kbps）", kbps),
+                        &format!("  ✓ Convertido (média {} kbps)", kbps),
+                    ))).ok();
+                } else {
+                    tx.send(BgMsg::Status(s(
+                        "  ✓ Конвертировано",
+                        "  ✓ Converted",
+                        "  ✓ Convertido",
+                        "  ✓ 変換完了",
+                        "  ✓ 변환 완료",
+                        "  ✓ 转换完成",
+                        "  ✓ Convertido",
+                    ))).ok();
+                }
+            }
+
+            if silence {
                 tx.send(BgMsg::Status(s(
-                    "  ✓ Конвертировано",
-                    "  ✓ Converted",
-                    "  ✓ Convertido",
-                    "  ✓ 変換完了",
-                    "  ✓ 변환 완료",
-                    "  ✓ 转换完成",
-                    "  ✓ Convertido",
+                    "▶ Добавление тишины...",
+                    "▶ Adding silence...",
+                    "▶ Agregando silencio...",
+                    "▶ 無音を追加中...",
+                    "▶ 무음 추가 중...",
+                    "▶ 正在添加静音...",
+                    "▶ Adicionando silêncio...",
                 ))).ok();
+                current = converter::add_silence(ffmpeg, &current, ms, format)?;
+                tx.send(BgMsg::Status(s(
+                    "  ✓ Тишина добавлена",
+                    "  ✓ Silence added",
+                    "  ✓ Silencio agregado",
+                    "  ✓ 無音を追加しました",
+                    "  ✓ 무음 추가 완료",
+                    "  ✓ 静音已添加",
+                    "  ✓ Silêncio adicionado",
+                ))).ok();
+            }
+
+            if debloat && debloat_bitrate > 0 {
+                let max_kbps = debloat_bitrate;
+                tx.send(BgMsg::Status(s(
+                    &format!("▶ Деблоатинг: cap {} kbps...", max_kbps),
+                    &format!("▶ Debloat: cap {} kbps...", max_kbps),
+                    &format!("▶ Reduciendo: límite {} kbps...", max_kbps),
+                    &format!("▶ デブロート: 上限 {} kbps...", max_kbps),
+                    &format!("▶ 디블로팅: 상한 {} kbps...", max_kbps),
+                    &format!("▶ 去膨胀：上限 {} kbps...", max_kbps),
+                    &format!("▶ Reduzindo: limite {} kbps...", max_kbps),
+                ))).ok();
+                current = converter::debloat(ffmpeg, &current, format, max_kbps)?;
+                tx.send(BgMsg::Status(s(
+                    &format!("  ✓ Деблоатинг завершён ({} kbps)", max_kbps),
+                    &format!("  ✓ Debloat done ({} kbps)", max_kbps),
+                    &format!("  ✓ Reducción completada ({} kbps)", max_kbps),
+                    &format!("  ✓ デブロート完了 ({} kbps)", max_kbps),
+                    &format!("  ✓ 디블로팅 완료 ({} kbps)", max_kbps),
+                    &format!("  ✓ 去膨胀完成（{} kbps）", max_kbps),
+                    &format!("  ✓ Redução concluída ({} kbps)", max_kbps),
+                ))).ok();
+            }
+
+            let actual = converter::get_actual_bitrate(&current, ffmpeg)
+                .ok().map(|b| b / 1000).unwrap_or(0);
+            if actual > 0 {
+                tx.send(BgMsg::Status(s(
+                    &format!("  ✓ Итоговый битрейт: {} kbps", actual),
+                    &format!("  ✓ Final bitrate: {} kbps", actual),
+                    &format!("  ✓ Tasa de bits final: {} kbps", actual),
+                    &format!("  ✓ 最終ビットレート: {} kbps", actual),
+                    &format!("  ✓ 최종 비트레이트: {} kbps", actual),
+                    &format!("  ✓ 最终比特率：{} kbps", actual),
+                    &format!("  ✓ Taxa de bits final: {} kbps", actual),
+                ))).ok();
+            }
+
+            converter::cleanup(dir, &current, format);
+
+            if !debloat && src_kbps > 0 && actual > src_kbps && src_kbps < target_kbps {
+                tx.send(BgMsg::Warning(s(
+                    &format!("⚠ Возможно раздутие аудио: {} → {} kbps. Проверьте спектрограмму вручную.", src_kbps, actual),
+                    &format!("⚠ Audio possibly bloated: {} → {} kbps. Manual spectrogram check required.", src_kbps, actual),
+                    &format!("⚠ Posible inflado de audio: {} → {} kbps. Verifique el espectrograma manualmente.", src_kbps, actual),
+                    &format!("⚠ オーディオが膨張している可能性があります: {} → {} kbps。手動でスペクトログラムを確認してください。", src_kbps, actual),
+                    &format!("⚠ 오디오가 부풀려졌을 가능성: {} → {} kbps. 수동으로 스펙트로그램을 확인하세요.", src_kbps, actual),
+                    &format!("⚠ 音频可能已膨胀：{} → {} kbps。请手动检查频谱图。", src_kbps, actual),
+                    &format!("⚠ Áudio possivelmente inflado: {} → {} kbps. Verifique o espectrograma manualmente.", src_kbps, actual),
+                ))).ok();
+            }
+
+            tx.send(BgMsg::Progress(
+                0.30 + ((idx + 1) as f32 / total as f32) * 0.65
+            )).ok();
+
+            if idx == 0 {
+                processed_first = Some(current);
             }
         }
 
-        if silence {
-            tx.send(BgMsg::Progress(0.65)).ok();
-            tx.send(BgMsg::Status(s(
-                "▶ Добавление тишины...",
-                "▶ Adding silence...",
-                "▶ Agregando silencio...",
-                "▶ 無音を追加中...",
-                "▶ 무음 추가 중...",
-                "▶ 正在添加静音...",
-                "▶ Adicionando silêncio...",
-            ))).ok();
-            current = converter::add_silence(ffmpeg, &current, ms, format)?;
-            tx.send(BgMsg::Progress(0.80)).ok();
-            tx.send(BgMsg::Status(s(
-                "  ✓ Тишина добавлена",
-                "  ✓ Silence added",
-                "  ✓ Silencio agregado",
-                "  ✓ 無音を追加しました",
-                "  ✓ 무음 추가 완료",
-                "  ✓ 静音已添加",
-                "  ✓ Silêncio adicionado",
-            ))).ok();
-        }
-
-        if debloat && debloat_bitrate > 0 {
-            let max_kbps = debloat_bitrate;
-            tx.send(BgMsg::Progress(0.85)).ok();
-            tx.send(BgMsg::Status(s(
-                &format!("▶ Деблоатинг: cap {} kbps...", max_kbps),
-                &format!("▶ Debloat: cap {} kbps...", max_kbps),
-                &format!("▶ Reduciendo: límite {} kbps...", max_kbps),
-                &format!("▶ デブロート: 上限 {} kbps...", max_kbps),
-                &format!("▶ 디블로팅: 상한 {} kbps...", max_kbps),
-                &format!("▶ 去膨胀：上限 {} kbps...", max_kbps),
-                &format!("▶ Reduzindo: limite {} kbps...", max_kbps),
-            ))).ok();
-            current = converter::debloat(ffmpeg, &current, format, max_kbps)?;
-            tx.send(BgMsg::Progress(0.92)).ok();
-            tx.send(BgMsg::Status(s(
-                &format!("  ✓ Деблоатинг завершён ({} kbps)", max_kbps),
-                &format!("  ✓ Debloat done ({} kbps)", max_kbps),
-                &format!("  ✓ Reducción completada ({} kbps)", max_kbps),
-                &format!("  ✓ デブロート完了 ({} kbps)", max_kbps),
-                &format!("  ✓ 디블로팅 완료 ({} kbps)", max_kbps),
-                &format!("  ✓ 去膨胀完成（{} kbps）", max_kbps),
-                &format!("  ✓ Redução concluída ({} kbps)", max_kbps),
-            ))).ok();
-        }
-
-        let actual = converter::get_actual_bitrate(&current, ffmpeg)
-            .ok().map(|b| b / 1000).unwrap_or(0);
-        if actual > 0 {
-            tx.send(BgMsg::Status(s(
-                &format!("  ✓ Итоговый битрейт: {} kbps", actual),
-                &format!("  ✓ Final bitrate: {} kbps", actual),
-                &format!("  ✓ Tasa de bits final: {} kbps", actual),
-                &format!("  ✓ 最終ビットレート: {} kbps", actual),
-                &format!("  ✓ 최종 비트레이트: {} kbps", actual),
-                &format!("  ✓ 最终比特率：{} kbps", actual),
-                &format!("  ✓ Taxa de bits final: {} kbps", actual),
-            ))).ok();
-        }
-
-        tx.send(BgMsg::Progress(0.90)).ok();
-        tx.send(BgMsg::Status(s(
-            "▶ Очистка временных файлов...",
-            "▶ Cleaning temp files...",
-            "▶ Limpiando archivos temporales...",
-            "▶ 一時ファイルを削除中...",
-            "▶ 임시 파일 정리 중...",
-            "▶ 正在清理临时文件...",
-            "▶ Limpando arquivos temporários...",
-        ))).ok();
-        converter::cleanup(dir, &current, format);
-        tx.send(BgMsg::Progress(0.95)).ok();
-        tx.send(BgMsg::Status(s("  ✓ Очищено", "  ✓ Cleaned", "  ✓ Limpiado", "  ✓ 削除完了", "  ✓ 정리 완료", "  ✓ 已清理", "  ✓ Limpo"))).ok();
-
         if let Some(ref orig_name) = local_work_rename {
-            let final_path = dir.join(orig_name).with_extension(
-                current.extension().unwrap_or_default()
-            );
-            std::fs::rename(&current, &final_path)?;
+            if let Some(ref processed) = processed_first {
+                let final_path = dir.join(orig_name).with_extension(
+                    processed.extension().unwrap_or_default()
+                );
+                std::fs::rename(processed, &final_path)?;
+            }
         }
 
         tx.send(BgMsg::Progress(1.0)).ok();
         tx.send(BgMsg::Status(s("  ✓ Готово", "  ✓ Done", "  ✓ Hecho", "  ✓ 完了", "  ✓ 완료", "  ✓ 完成", "  ✓ Pronto"))).ok();
-
-        if !debloat && src_kbps > 0 && actual > src_kbps && src_kbps < target_kbps {
-            tx.send(BgMsg::Warning(s(
-                &format!("⚠ Возможно раздутие аудио: {} → {} kbps. Проверьте спектрограмму вручную.", src_kbps, actual),
-                &format!("⚠ Audio possibly bloated: {} → {} kbps. Manual spectrogram check required.", src_kbps, actual),
-                &format!("⚠ Posible inflado de audio: {} → {} kbps. Verifique el espectrograma manualmente.", src_kbps, actual),
-                &format!("⚠ オーディオが膨張している可能性があります: {} → {} kbps。手動でスペクトログラムを確認してください。", src_kbps, actual),
-                &format!("⚠ 오디오가 부풀려졌을 가능성: {} → {} kbps. 수동으로 스펙트로그램을 확인하세요.", src_kbps, actual),
-                &format!("⚠ 音频可能已膨胀：{} → {} kbps。请手动检查频谱图。", src_kbps, actual),
-                &format!("⚠ Áudio possivelmente inflado: {} → {} kbps. Verifique o espectrograma manualmente.", src_kbps, actual),
-            ))).ok();
-        }
 
         Ok(())
     }
@@ -696,6 +720,7 @@ impl eframe::App for NeuMusicApp {
                             t(&self.lang, "Скачать весь плейлист", "Download entire playlist", "Descargar lista de reproducción completa", "プレイリスト全体をダウンロード", "전체 재생목록 다운로드", "下载整个播放列表", "Baixar lista de reprodução inteira"),
                         );
 
+                        ui.separator();
                         ui.checkbox(
                             &mut self.debloat_enabled,
                             t(&self.lang, "Деблоатинг аудио", "Debloat audio", "Reducir tamaño de audio", "オーディオのデブロート", "오디오 디블로팅", "音频去膨胀", "Reduzir tamanho do áudio"),
