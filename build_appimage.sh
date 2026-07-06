@@ -17,6 +17,9 @@ if [ ! -f assets/yt-dlp ]; then
 fi
 chmod +x assets/yt-dlp
 
+echo "=== Downloading CJK fonts ==="
+bash "$SCRIPT_DIR/download_fonts.sh"
+
 echo "=== Building release binary ==="
 cargo build --release
 

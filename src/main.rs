@@ -131,6 +131,33 @@ fn main() -> eframe::Result<()> {
         "NeuMusic",
         options,
         Box::new(move |cc: &eframe::CreationContext| {
+            let mut fonts = egui::FontDefinitions::default();
+
+            {
+                let jp: std::sync::Arc<egui::FontData> = egui::FontData::from_static(
+                    include_bytes!("../assets/NotoSansJP-Regular.otf"),
+                ).into();
+                let kr: std::sync::Arc<egui::FontData> = egui::FontData::from_static(
+                    include_bytes!("../assets/NotoSansKR-Regular.otf"),
+                ).into();
+                let sc: std::sync::Arc<egui::FontData> = egui::FontData::from_static(
+                    include_bytes!("../assets/NotoSansSC-Regular.otf"),
+                ).into();
+
+                fonts.font_data.insert("noto-jp".into(), jp);
+                fonts.font_data.insert("noto-kr".into(), kr);
+                fonts.font_data.insert("noto-sc".into(), sc);
+
+                fonts.families.entry(egui::FontFamily::Proportional).or_default()
+                    .push("noto-jp".into());
+                fonts.families.entry(egui::FontFamily::Proportional).or_default()
+                    .push("noto-sc".into());
+                fonts.families.entry(egui::FontFamily::Proportional).or_default()
+                    .push("noto-kr".into());
+            }
+
+            cc.egui_ctx.set_fonts(fonts);
+
             let saved_dir = cc.storage.and_then(|s| s.get_string("output_dir"));
             Ok(Box::new(neumusic::NeuMusicApp::new(yt_dlp, ffmpeg, saved_dir)))
         }),
