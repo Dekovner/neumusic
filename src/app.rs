@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use rfd::FileDialog;
@@ -53,6 +55,26 @@ enum UpdateState {
     Checking,
     Available(String),
     Current,
+    Error(String),
+}
+
+#[derive(Clone)]
+pub enum YtdlpUpdateEvent {
+    Checking,
+    Version(String),
+    Current,
+    Available(String),
+    Downloaded,
+    Error(String),
+    Done,
+}
+
+enum YtdlpUpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Downloading(String),
+    Downloaded,
     Error(String),
 }
 
@@ -126,10 +148,21 @@ pub struct NeuMusicApp {
     log: Vec<(String, egui::Color32)>,
     update_state: UpdateState,
     update_rx: Option<mpsc::Receiver<UpdateState>>,
+
+    ytdlp_display: String,
+    ytdlp_update_state: YtdlpUpdateState,
+    ytdlp_update_rx: Option<mpsc::Receiver<YtdlpUpdateEvent>>,
+    cancel_flag: Arc<AtomicBool>,
+    active_child: Arc<Mutex<Option<Child>>>,
 }
 
 impl NeuMusicApp {
-    pub fn new(yt_dlp: PathBuf, ffmpeg: PathBuf, saved_dir: Option<String>) -> Self {
+    pub fn new(
+        yt_dlp: PathBuf,
+        ffmpeg: PathBuf,
+        saved_dir: Option<String>,
+        ytdlp_update_rx: Option<mpsc::Receiver<YtdlpUpdateEvent>>,
+    ) -> Self {
         let output_dir = saved_dir
             .map(PathBuf::from)
             .unwrap_or_default();
@@ -138,16 +171,28 @@ impl NeuMusicApp {
             yt_dlp,
             ffmpeg,
             output_dir,
+            url: String::new(),
+            local_file: None,
             convert_192: true,
-            silence_ms: "2000".to_owned(),
             output_format: OutputFormat::Mp3,
+            add_silence: false,
+            silence_ms: "2000".to_owned(),
+            playlist: false,
             debloat_enabled: false,
             debloat_bitrate: 0,
             lang: Lang::En,
             status: "Ready".to_owned(),
             progress: 0.0,
+            busy: false,
+            bg_task: None,
             log: vec![("Ready".to_owned(), egui::Color32::WHITE)],
-            ..Default::default()
+            update_state: UpdateState::Idle,
+            update_rx: None,
+            ytdlp_display: String::new(),
+            ytdlp_update_state: YtdlpUpdateState::Idle,
+            ytdlp_update_rx,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            active_child: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -214,6 +259,7 @@ impl NeuMusicApp {
         }
 
         self.busy = true;
+        self.cancel_flag.store(false, Ordering::Relaxed);
         self.progress = 0.0;
         self.log.clear();
         self.status = t(&self.lang, "Загрузка...", "Downloading...", "Descargando...", "ダウンロード中...", "다운로드 중...", "下载中...", "Baixando...");
@@ -235,6 +281,8 @@ impl NeuMusicApp {
         let debloat_bitrate = self.debloat_bitrate;
         let local_file = self.local_file.clone();
         let lang = self.lang;
+        let cancel = self.cancel_flag.clone();
+        let child_lock = self.active_child.clone();
 
         let (tx, rx) = mpsc::channel();
         self.bg_task = Some(rx);
@@ -243,7 +291,7 @@ impl NeuMusicApp {
             let result = Self::run_pipeline(
                 &yt_dlp, &ffmpeg, &url, &dir,
                 convert, &format_str, silence, ms, playlist, debloat, debloat_bitrate as u64, local_file,
-                &lang, &tx,
+                &lang, &tx, &cancel, &child_lock,
             );
             match result {
                 Ok(()) => tx.send(BgMsg::Done).ok(),
@@ -270,6 +318,8 @@ impl NeuMusicApp {
         local_file: Option<PathBuf>,
         lang: &Lang,
         tx: &mpsc::Sender<BgMsg>,
+        cancel_flag: &AtomicBool,
+        child_lock: &Mutex<Option<Child>>,
     ) -> anyhow::Result<()> {
         let s = |ru: &str, en: &str, es: &str, ja: &str, ko: &str, zh: &str, pt: &str| -> String {
             match lang {
@@ -326,7 +376,7 @@ impl NeuMusicApp {
         } else {
             tx.send(BgMsg::Progress(0.05)).ok();
             tx.send(BgMsg::Status(s("▶ Скачивание...", "▶ Downloading...", "▶ Descargando...", "▶ ダウンロード中...", "▶ 다운로드 중...", "▶ 下载中...", "▶ Baixando..."))).ok();
-            first_current = Some(downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent())?);
+            first_current = Some(downloader::download_audio(yt_dlp, url, dir, playlist, ffmpeg.parent(), cancel_flag, child_lock)?);
             tx.send(BgMsg::Progress(0.30)).ok();
             tx.send(BgMsg::Status(s("  ✓ Скачано", "  ✓ Downloaded", "  ✓ Descargado", "  ✓ ダウンロード完了", "  ✓ 다운로드 완료", "  ✓ 下载完成", "  ✓ Baixado"))).ok();
         }
@@ -574,6 +624,16 @@ fn open_releases_page() {
     { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
 }
 
+impl Drop for NeuMusicApp {
+    fn drop(&mut self) {
+        self.cancel_flag.store(true, Ordering::Relaxed);
+        if let Some(mut child) = self.active_child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl Default for NeuMusicApp {
     fn default() -> Self {
         Self {
@@ -597,6 +657,11 @@ impl Default for NeuMusicApp {
             log: Vec::new(),
             update_state: UpdateState::Idle,
             update_rx: None,
+            ytdlp_display: String::new(),
+            ytdlp_update_state: YtdlpUpdateState::Idle,
+            ytdlp_update_rx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            active_child: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -610,6 +675,40 @@ impl eframe::App for NeuMusicApp {
             if let Ok(state) = rx.try_recv() {
                 self.update_state = state;
                 self.update_rx = None;
+            }
+        }
+
+        if let Some(rx) = &self.ytdlp_update_rx {
+            if let Ok(ev) = rx.try_recv() {
+                match ev {
+                    YtdlpUpdateEvent::Checking => {
+                        self.ytdlp_display = String::new();
+                        self.ytdlp_update_state = YtdlpUpdateState::Checking;
+                    }
+                    YtdlpUpdateEvent::Version(v) => {
+                        self.ytdlp_display = format!("yt-dlp v{}", v);
+                    }
+                    YtdlpUpdateEvent::Current => {
+                        self.ytdlp_update_state = YtdlpUpdateState::UpToDate;
+                    }
+                    YtdlpUpdateEvent::Available(v) => {
+                        self.ytdlp_update_state = YtdlpUpdateState::Downloading(v);
+                    }
+                    YtdlpUpdateEvent::Downloaded => {
+                        let v = match &self.ytdlp_update_state {
+                            YtdlpUpdateState::Downloading(v) => v.clone(),
+                            _ => String::new(),
+                        };
+                        self.ytdlp_display = format!("yt-dlp v{}", v);
+                        self.ytdlp_update_state = YtdlpUpdateState::Downloaded;
+                    }
+                    YtdlpUpdateEvent::Error(e) => {
+                        self.ytdlp_update_state = YtdlpUpdateState::Error(e);
+                    }
+                    YtdlpUpdateEvent::Done => {
+                        self.ytdlp_update_rx = None;
+                    }
+                }
             }
         }
 
@@ -765,6 +864,74 @@ impl eframe::App for NeuMusicApp {
                                 }
                             }
                         });
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            match &self.ytdlp_update_state {
+                                YtdlpUpdateState::Idle | YtdlpUpdateState::Checking => {
+                                    ui.colored_label(egui::Color32::from_rgba_premultiplied(150, 150, 150, 160), "yt-dlp:");
+                                    ui.spinner();
+                                    ui.label(t(&self.lang,
+                                        "Проверка обновлений...",
+                                        "Checking for updates...",
+                                        "Buscando actualizaciones...",
+                                        "アップデートを確認中...",
+                                        "업데이트 확인 중...",
+                                        "正在检查更新...",
+                                        "Verificando atualizações...",
+                                    ));
+                                }
+                                YtdlpUpdateState::UpToDate => {
+                                    ui.colored_label(egui::Color32::from_rgba_premultiplied(150, 150, 150, 160), &self.ytdlp_display);
+                                    ui.colored_label(egui::Color32::GREEN, t(&self.lang,
+                                        "✓ Актуальна",
+                                        "✓ Up to date",
+                                        "✓ Actualizado",
+                                        "✓ 最新です",
+                                        "✓ 최신 버전",
+                                        "✓ 已是最新",
+                                        "✓ Atualizado",
+                                    ));
+                                }
+                                YtdlpUpdateState::Downloading(v) => {
+                                    ui.colored_label(egui::Color32::from_rgba_premultiplied(150, 150, 150, 160), &self.ytdlp_display);
+                                    ui.spinner();
+                                    ui.colored_label(egui::Color32::YELLOW, &t(&self.lang,
+                                        &format!("Скачиваю {}...", v),
+                                        &format!("Downloading {}...", v),
+                                        &format!("Descargando {}...", v),
+                                        &format!("{} をダウンロード中...", v),
+                                        &format!("{} 다운로드 중...", v),
+                                        &format!("正在下载 {}...", v),
+                                        &format!("Baixando {}...", v),
+                                    ));
+                                }
+                                YtdlpUpdateState::Downloaded => {
+                                    ui.colored_label(egui::Color32::from_rgba_premultiplied(150, 150, 150, 160), &self.ytdlp_display);
+                                    ui.colored_label(egui::Color32::GREEN, t(&self.lang,
+                                        "✓ Обновлён (перезапустите)",
+                                        "✓ Updated (restart to use)",
+                                        "✓ Actualizado (reiniciar)",
+                                        "✓ 更新完了 (再起動してください)",
+                                        "✓ 업데이트 완료 (재시작 필요)",
+                                        "✓ 已更新（重启生效）",
+                                        "✓ Atualizado (reiniciar)",
+                                    ));
+                                }
+                                YtdlpUpdateState::Error(e) => {
+                                    ui.colored_label(egui::Color32::from_rgba_premultiplied(150, 150, 150, 160), &self.ytdlp_display);
+                                    ui.colored_label(egui::Color32::RED, t(&self.lang,
+                                        &format!("⚠ {}", e),
+                                        &format!("⚠ {}", e),
+                                        &format!("⚠ {}", e),
+                                        &format!("⚠ {}", e),
+                                        &format!("⚠ {}", e),
+                                        &format!("⚠ {}", e),
+                                        &format!("⚠ {}", e),
+                                    ));
+                                }
+                            }
+                        });
                     });
 
                 ui.separator();
@@ -787,6 +954,13 @@ impl eframe::App for NeuMusicApp {
                     }
                     if self.busy {
                         ui.spinner();
+                        if ui.button(t(&self.lang, "✕ Отмена", "✕ Cancel", "✕ Cancelar", "✕ キャンセル", "✕ 취소", "✕ 取消", "✕ Cancelar")).clicked() {
+                            self.cancel_flag.store(true, Ordering::Relaxed);
+                            if let Some(mut child) = self.active_child.lock().unwrap().take() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
+                        }
                     }
                 });
 

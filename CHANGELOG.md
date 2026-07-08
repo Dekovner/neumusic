@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.0.0
+
+### New features
+- Auto-update yt-dlp on every startup (checks GitHub API, downloads latest)
+- yt-dlp version display in Settings (gray, semi-transparent)
+- Cancel button for active downloads (kills yt-dlp process)
+- yt-dlp killed on app exit (Drop impl)
+- Persistent yt-dlp cache (`~/.local/share/neumusic/yt-dlp`)
+
+### Changes
+- yt-dlp is now cached on disk and auto-updated; no more manual rebuilds needed
+- Settings → new yt-dlp section with live status (checking/downloading/updated/error)
+
+---
+
 ## v1.2.2
 
 ### Removed

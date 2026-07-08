@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
-#[cfg(not(target_os = "windows"))]
 use std::process::Command;
 
 use rust_embed::RustEmbed;
@@ -69,6 +70,57 @@ fn extract_yt_dlp() -> Option<PathBuf> {
     }
 }
 
+fn yt_dlp_cache_dir() -> PathBuf {
+    let base = if cfg!(target_os = "linux") {
+        std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+                    .join(".local/share")
+            })
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+            .join("Library/Application Support")
+    } else if cfg!(target_os = "windows") {
+        PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| "C:\\temp".into()))
+    } else {
+        std::env::temp_dir()
+    };
+    base.join("neumusic")
+}
+
+fn yt_dlp_version(path: &Path) -> Option<String> {
+    Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+            if s.is_empty() { None } else { Some(s) }
+        })
+}
+
+fn download_ytdlp(url: &str, dest: &Path) -> Result<(), String> {
+    let resp = ureq::get(url)
+        .call()
+        .map_err(|e| format!("HTTP: {}", e))?;
+    let mut data = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut data)
+        .map_err(|e| format!("Read: {}", e))?;
+    let tmp = dest.with_extension(".tmp");
+    std::fs::write(&tmp, &data).map_err(|e| format!("Write: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Chmod: {}", e))?;
+    }
+    std::fs::rename(&tmp, dest).map_err(|e| format!("Rename: {}", e))?;
+    Ok(())
+}
+
 #[cfg(not(target_os = "windows"))]
 fn resolve_ffmpeg() -> Option<PathBuf> {
     let output = Command::new("which").arg("ffmpeg").output().ok()?;
@@ -105,8 +157,89 @@ fn extract_ffmpeg() -> Option<PathBuf> {
 }
 
 fn main() -> eframe::Result<()> {
-    let yt_dlp = extract_yt_dlp().unwrap_or_else(|| {
+    // 1. Extract embedded yt-dlp (fallback)
+    let embedded = extract_yt_dlp().unwrap_or_else(|| {
         die("Error: yt-dlp not found in embedded resources. Rebuild the application.");
+    });
+
+    // 2. Set up cache dir
+    let cache_dir = yt_dlp_cache_dir();
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    #[cfg(target_os = "windows")]
+    const BINARY_NAME: &str = "yt-dlp.exe";
+    #[cfg(not(target_os = "windows"))]
+    const BINARY_NAME: &str = "yt-dlp";
+
+    let cached = cache_dir.join(BINARY_NAME);
+
+    // 3. Seed cache from embedded if needed
+    if !cached.exists() || yt_dlp_version(&cached).is_none() {
+        let _ = std::fs::copy(&embedded, &cached);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&cached, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    // 4. Use cached if valid, else fallback to embedded
+    let yt_dlp = if yt_dlp_version(&cached).is_some() {
+        cached
+    } else {
+        embedded
+    };
+
+    // 5. Background updater channel
+    let (update_tx, update_rx) = mpsc::channel::<neumusic::app::YtdlpUpdateEvent>();
+
+    // 6. Spawn background updater
+    let yt_dlp_for_updater = yt_dlp.clone();
+    let cache_dir_for_updater = cache_dir.clone();
+    std::thread::spawn(move || {
+        let emit = |ev: neumusic::app::YtdlpUpdateEvent| { let _ = update_tx.send(ev); };
+
+        emit(neumusic::app::YtdlpUpdateEvent::Checking);
+
+        let current_ver = yt_dlp_version(&yt_dlp_for_updater).unwrap_or_default();
+        emit(neumusic::app::YtdlpUpdateEvent::Version(current_ver.clone()));
+
+        let result = (|| -> Result<String, String> {
+            let resp = ureq::get("https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest")
+                .set("User-Agent", "neumusic/1.0")
+                .call()
+                .map_err(|e| format!("HTTP: {}", e))?;
+            let body = resp.into_string()
+                .map_err(|e| format!("Read: {}", e))?;
+            let tag = body.split("\"tag_name\":\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .ok_or_else(|| "Parse error".to_owned())?;
+            Ok(tag.to_owned())
+        })();
+
+        match result {
+            Ok(latest) => {
+                if latest == current_ver {
+                    emit(neumusic::app::YtdlpUpdateEvent::Current);
+                } else {
+                    emit(neumusic::app::YtdlpUpdateEvent::Available(latest.clone()));
+
+                    let url = format!(
+                        "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp{}",
+                        latest,
+                        if cfg!(target_os = "windows") { ".exe" } else { "" }
+                    );
+                    let dest = cache_dir_for_updater.join(BINARY_NAME);
+                    match download_ytdlp(&url, &dest) {
+                        Ok(()) => emit(neumusic::app::YtdlpUpdateEvent::Downloaded),
+                        Err(e) => emit(neumusic::app::YtdlpUpdateEvent::Error(e)),
+                    }
+                }
+            }
+            Err(e) => emit(neumusic::app::YtdlpUpdateEvent::Error(e)),
+        }
+        emit(neumusic::app::YtdlpUpdateEvent::Done);
     });
 
     #[cfg(not(target_os = "windows"))]
@@ -159,7 +292,7 @@ fn main() -> eframe::Result<()> {
             cc.egui_ctx.set_fonts(fonts);
 
             let saved_dir = cc.storage.and_then(|s| s.get_string("output_dir"));
-            Ok(Box::new(neumusic::NeuMusicApp::new(yt_dlp, ffmpeg, saved_dir)))
+            Ok(Box::new(neumusic::NeuMusicApp::new(yt_dlp, ffmpeg, saved_dir, Some(update_rx))))
         }),
     )
 }
