@@ -779,7 +779,7 @@ impl eframe::App for NeuMusicApp {
                 }
 
                 ui.horizontal(|ui| {
-                    if ui.button(t(&self.lang, "Обзор...", "Browse...", "Examinar...", "参照...", "찾아보기...", "浏览...", "Procurar...")).clicked() {
+                    if ui.button(t(&self.lang, "Выбрать папку", "Choose directory", "Elegir carpeta", "フォルダを選択", "폴더 선택", "选择文件夹", "Escolher pasta")).clicked() {
                         self.pick_dir();
                     }
                     ui.label(self.output_dir.to_str().unwrap_or(
@@ -961,6 +961,17 @@ impl eframe::App for NeuMusicApp {
                                 let _ = child.wait();
                             }
                         }
+                    }
+                    if !self.busy && self.output_dir.as_os_str().is_empty() {
+                        ui.colored_label(egui::Color32::GRAY, t(&self.lang,
+                            "Выберите папку для сохранения",
+                            "Select a download directory",
+                            "Seleccione una carpeta de descarga",
+                            "保存フォルダを選択してください",
+                            "저장 폴더를 선택하세요",
+                            "请选择下载目录",
+                            "Selecione uma pasta de download",
+                        ));
                     }
                 });
 
